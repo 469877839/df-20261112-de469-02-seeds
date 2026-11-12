@@ -1,0 +1,21 @@
+title: git-history demos
+about: About these demos
+about_url: https://github.com/simonw/git-history/blob/main/README.md#demos
+plugins:
+  datasette-remote-metadata:
+    url: https://raw.githubusercontent.com/simonw/git-history/main/demos/metadata.yml
+databases:
+  pge-outages:
+    title: PG&E Outages
+    source: simonw/pge-outages
+    source_url: https://github.com/simonw/pge-outages
+    tables:
+      commits:
+        label_column: commit_at
+  ca-fires:
+    title: fire.ca.gov incidents
+    source: simonw/ca-fires-history
+    source_url: https://github.com/simonw/ca-fires-history
+    tables:
+      commits:
+        label_column: commit_at
