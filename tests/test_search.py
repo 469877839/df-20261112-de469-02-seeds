@@ -1,0 +1,3112 @@
+import datetime
+from datetime import timedelta
+from time import process_time
+from typing import Any
+from unittest.mock import patch
+
+import pytz
+from parameterized import param, parameterized
+
+from dateparser.conf import Settings, apply_settings
+from dateparser.date import DateDataParser
+from dateparser.search import search_dates
+from dateparser.search.search import DateSearchWithDetection
+from dateparser.timezone_parser import StaticTzInfo
+from dateparser_data.settings import default_parsers
+from tests import BaseTestCase
+
+today = datetime.datetime.now()
+relative_base = datetime.datetime(2020, 2, 13, 20, 7, 6)
+
+
+class TestTranslateSearch(BaseTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.search_with_detection = DateSearchWithDetection()
+        self.exact_language_search = self.search_with_detection.search
+
+    def run_search_dates_function_invalid_languages(
+        self, text: str, languages: object, error_type: type[Exception]
+    ) -> None:
+        try:
+            search_dates(text=text, languages=languages)  # type: ignore[arg-type]
+        except Exception as error:
+            self.error = error
+            self.assertIsInstance(self.error, error_type)
+
+    def check_error_message(self, message: str) -> None:
+        self.assertEqual(str(self.error), message)
+
+    @parameterized.expand(
+        [
+            # English
+            param("en", "Sep 03 2014"),
+            param("en", "friday, 03 september 2014"),
+            param("en", "Aug 06, 2018 05:05 PM CDT"),
+            # Chinese
+            param("zh", "1年11个月"),
+            param("zh", "1年11個月"),
+            param("zh", "2015年04月08日10点05"),
+            param("zh", "2015年04月08日10:05"),
+            param("zh", "2013年04月08日"),
+            param("zh", "周一"),
+            param("zh", "礼拜一"),
+            param("zh", "周二"),
+            param("zh", "礼拜二"),
+            param("zh", "周三"),
+            param("zh", "礼拜三"),
+            param("zh", "星期日 2015年04月08日10:05"),
+            param("zh", "周六 2013年04月08日"),
+            param("zh", "下午3:30"),
+            param("zh", "凌晨3:30"),
+            param("zh", "中午"),
+            # French
+            param("fr", "20 Février 2012"),
+            param("fr", "Mercredi 19 Novembre 2013"),
+            param("fr", "18 octobre 2012 à 19 h 21 min"),
+            # German
+            param("de", "29. Juni 2007"),
+            param("de", "Montag 5 Januar, 2015"),
+            # Hungarian
+            param("hu", "2016 augusztus 11"),
+            param("hu", "2016-08-13 szombat 10:21"),
+            param("hu", "2016. augusztus 14. vasárnap 10:21"),
+            param("hu", "hétfő"),
+            param("hu", "tegnapelőtt"),
+            param("hu", "ma"),
+            param("hu", "2 hónappal ezelőtt"),
+            param("hu", "2016-08-13 szombat 10:21 GMT"),
+            # Spanish
+            param("es", "Miércoles 31 Diciembre 2014"),
+            # Italian
+            param("it", "Giovedi Maggio 29 2013"),
+            param("it", "19 Luglio 2013"),
+            # Portuguese
+            param("pt", "22 de dezembro de 2014 às 02:38"),
+            # Russian
+            param("ru", "5 августа 2014 г в 12:00"),
+            # Real: param('ru', "5 августа 2014 г. в 12:00"),
+            # Turkish
+            param("tr", "2 Ocak 2015 Cuma, 16:49"),
+            # Czech
+            param("cs", "22. prosinec 2014 v 2:38"),
+            # Dutch
+            param("nl", "maandag 22 december 2014 om 2:38"),
+            # Romanian
+            param("ro", "22 Decembrie 2014 la 02:38"),
+            # Polish
+            param("pl", "4 stycznia o 13:50"),
+            param("pl", "29 listopada 2014 o 08:40"),
+            # Ukrainian
+            param("uk", "30 листопада 2013 о 04:27"),
+            # Belarusian
+            param("be", "5 снежня 2015 г у 12:00"),
+            # Real: param('be', "5 снежня 2015 г. у 12:00"), Issue: Abbreviation segmentation.
+            param("be", "11 верасня 2015 г у 12:11"),
+            # Real: param('be', "11 верасня 2015 г. у 12:11"),
+            param("be", "3 стд 2015 г у 10:33"),
+            # Real: param('be', "3 стд 2015 г. у 10:33"),
+            # Arabic
+            param("ar", "6 يناير، 2015، الساعة 05:16 مساءً"),
+            param("ar", "7 يناير، 2015، الساعة 11:00 صباحاً"),
+            # Vietnamese
+            # Disabled - wrong segmentation at "Thứ Năm"
+            # param('vi', "Thứ Năm, ngày 8 tháng 1 năm 2015"),
+            # Disabled - wrong segmentation at "Thứ Tư"
+            # param('vi', "Thứ Tư, 07/01/2015 | 22:34"),
+            param("vi", "9 Tháng 1 2015 lúc 15:08"),
+            # Thai
+            # Disabled - spacing differences
+            # param('th', "เมื่อ กุมภาพันธ์ 09, 2015, 09:27:57 AM"),
+            # param('th', "เมื่อ กรกฎาคม 05, 2012, 01:18:06 AM"),
+            # Tagalog
+            param("tl", "Biyernes Hulyo 3, 2015"),
+            param("tl", "Pebrero 5, 2015 7:00 pm"),
+            # Indonesian
+            param("id", "06 Sep 2015"),
+            param("id", "07 Feb 2015 20:15"),
+            # Miscellaneous
+            param("en", "2014-12-12T12:33:39-08:00"),
+            param("en", "2014-10-15T16:12:20+00:00"),
+            param("en", "28 Oct 2014 16:39:01 +0000"),
+            # Disabled - wrong split at "a las".
+            # param('es', "13 Febrero 2015 a las 23:00"),
+            # Danish
+            param("da", "Sep 03 2014"),
+            param("da", "fredag, 03 september 2014"),
+            param("da", "fredag d. 3 september 2014"),
+            # Finnish
+            param("fi", "maanantai tammikuu 16, 2015"),
+            param("fi", "ma tammi 16, 2015"),
+            param("fi", "tiistai helmikuu 16, 2015"),
+            param("fi", "ti helmi 16, 2015"),
+            param("fi", "keskiviikko maaliskuu 16, 2015"),
+            param("fi", "ke maalis 16, 2015"),
+            param("fi", "torstai huhtikuu 16, 2015"),
+            param("fi", "to huhti 16, 2015"),
+            param("fi", "perjantai toukokuu 16, 2015"),
+            param("fi", "pe touko 16, 2015"),
+            param("fi", "lauantai kesäkuu 16, 2015"),
+            param("fi", "la kesä 16, 2015"),
+            param("fi", "sunnuntai heinäkuu 16, 2015"),
+            param("fi", "su heinä 16, 2015"),
+            param("fi", "su elokuu 16, 2015"),
+            param("fi", "su elo 16, 2015"),
+            param("fi", "su syyskuu 16, 2015"),
+            param("fi", "su syys 16, 2015"),
+            param("fi", "su lokakuu 16, 2015"),
+            param("fi", "su loka 16, 2015"),
+            param("fi", "su marraskuu 16, 2015"),
+            param("fi", "su marras 16, 2015"),
+            param("fi", "su joulukuu 16, 2015"),
+            param("fi", "su joulu 16, 2015"),
+            param("fi", "1. tammikuuta, 2016"),
+            param("fi", "tiistaina, 27. lokakuuta 2015"),
+            # Japanese
+            param("ja", "午後3時"),
+            param("ja", "2時"),
+            param("ja", "11時42分"),
+            param("ja", "3ヶ月"),
+            param("ja", "約53か月前"),
+            param("ja", "3月"),
+            param("ja", "十二月"),
+            param("ja", "2月10日"),
+            param("ja", "2013年2月"),
+            param("ja", "2013年04月08日"),
+            param("ja", "2016年03月24日 木曜日 10時05分"),
+            param("ja", "2016年3月20日 21時40分"),
+            param("ja", "2016年03月21日 23時05分11秒"),
+            param("ja", "2016年3月21日(月) 14時48分"),
+            param("ja", "2016年3月20日(日) 21時40分"),
+            param("ja", "2016年3月20日 (日) 21時40分"),
+            param("ja", "正午"),
+            param("ja", "明後日"),
+            param("ja", "明後日の正午"),
+            # Hebrew
+            param("he", "20 לאפריל 2012"),
+            param("he", "יום רביעי ה-19 בנובמבר 2013"),
+            param("he", "18 לאוקטובר 2012 בשעה 19:21"),
+            # Disabled - wrong split at "יום ה'".
+            # param('he', "יום ה' 6/10/2016"),
+            param("he", "חצות"),
+            param("he", "1 אחר חצות"),
+            param("he", "3 לפנות בוקר"),
+            param("he", "3 בבוקר"),
+            param("he", "3 בצהריים"),
+            param("he", "6 לפנות ערב"),
+            param("he", "6 אחרי הצהריים"),
+            param("he", "6 אחרי הצהרים"),
+            # Bangla
+            param("bn", "সেপ্টেম্বর 03 2014"),
+            param("bn", "শুক্রবার, 03 সেপ্টেম্বর 2014"),
+            # Hindi
+            param("hi", "सोमवार 13 जून 1998"),
+            param("hi", "मंगल 16 1786 12:18"),
+            param("hi", "शनि 11 अप्रैल 2002 03:09"),
+            # Swedish
+            param("sv", "Sept 03 2014"),
+            param("sv", "fredag, 03 september 2014"),
+        ]
+    )
+    def test_search_date_string(self, shortname: str, datetime_string: str) -> None:
+        result = self.exact_language_search.search(
+            shortname, datetime_string, settings=Settings()
+        )[1][0]
+        self.assertEqual(result, datetime_string)
+
+    @parameterized.expand(
+        [
+            # Arabic
+            param(
+                "ar",
+                "في 29 يوليو 1938 غزت القوات اليابانية الاتحاد"
+                " السوفييتي ووقعت أولى المعارك والتي انتصر فيها السوفييت، وعلى الرغم من ذلك رفضت"
+                " اليابان الاعتراف بذلك وقررت في 11 مايو 1939 تحريك الحدود المنغولية حتى نهر غول،"
+                " حيث وقعت معركة خالخين غول والتي انتصر فيها الجيش الأحمر على جيش كوانتونغ",
+                [
+                    ("في 29 يوليو 1938", datetime.datetime(1938, 7, 29, 0, 0)),
+                    ("في 11 مايو 1939", datetime.datetime(1939, 5, 11, 0, 0)),
+                ],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            param(
+                "ar",
+                "صدر القرار قبل 5 يونيو 2020",
+                [("5 يونيو 2020", datetime.datetime(2020, 6, 5, 0, 0))],
+            ),
+            # Belarusian
+            param(
+                "be",
+                "Пасля апублікавання Патсдамскай дэкларацыі 26 ліпеня 1945 года і адмовы Японіі капітуляваць "
+                "на яе ўмовах ЗША скінулі атамныя бомбы.",
+                [("26 ліпеня 1945 года і", datetime.datetime(1945, 7, 26, 0, 0))],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Bulgarian
+            param(
+                "bg",
+                "На 16 юни 1944 г. започват въздушни "
+                "бомбардировки срещу Япония, използувайки новозавладените острови като бази.",
+                [("На 16 юни 1944 г", datetime.datetime(1944, 6, 16, 0, 0))],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Chinese
+            param(
+                "zh",
+                "不過大多數人仍多把第二次世界大戰的爆發定為1939年9月1日德國入侵波蘭開始，這次入侵行動隨即導致英國與法國向德國宣戰。",
+                [("1939年9月1", datetime.datetime(1939, 9, 1, 0, 0))],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Czech
+            param(
+                "cs",
+                "V roce 1920 byla proto vytvořena Společnost národů, jež měla fungovat jako fórum, "
+                "na němž měly národy mírovým způsobem urovnávat svoje spory.",
+                [("1920", datetime.datetime(1920, 1, 1, 0, 0))],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Danish
+            param(
+                "da",
+                "Krigen i Europa begyndte den 1. september 1939, da Nazi-Tyskland invaderede Polen, "
+                "og endte med Nazi-Tysklands betingelsesløse overgivelse den 8. maj 1945.",
+                [
+                    # "den" is a Danish skip word (as in "den 8. maj"), so it is
+                    # included in the matched substring, like "de" in Spanish.
+                    ("den 1. september 1939", datetime.datetime(1939, 9, 1, 0, 0)),
+                    ("den 8. maj 1945", datetime.datetime(1945, 5, 8, 0, 0)),
+                ],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Dutch
+            param(
+                "nl",
+                " De meest dramatische uitbreiding van het conflict vond plaats op 22 juni 1941 met de "
+                "Duitse aanval op de Sovjet-Unie.",
+                [("22 juni 1941", datetime.datetime(1941, 6, 22, 0, 0))],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # English
+            param(
+                "en",
+                "I will meet you tomorrow at noon",
+                [("tomorrow at noon", datetime.datetime(2000, 1, 2, 12, 0))],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            param(
+                "en",
+                "in a minute",
+                [("in a minute", datetime.datetime(2000, 1, 1, 0, 1))],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            param(
+                "en",
+                "last decade",
+                [("last decade", datetime.datetime(1990, 1, 1, 0, 0))],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            param(
+                "en",
+                "July 13th.\r\n July 14th",
+                [
+                    ("July 13th", datetime.datetime(2000, 7, 13, 0, 0)),
+                    ("July 14th", datetime.datetime(2000, 7, 14, 0, 0)),
+                ],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            param(
+                "en",
+                "last updated Aug 06, 2018 05:05 PM CDT",
+                [
+                    (
+                        "Aug 06, 2018 05:05 PM CDT",
+                        datetime.datetime(
+                            2018,
+                            8,
+                            6,
+                            17,
+                            5,
+                            tzinfo=StaticTzInfo(
+                                "CDT", datetime.timedelta(seconds=-18000)
+                            ),
+                        ),
+                    )
+                ],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            param(
+                "en",
+                "25th march 2015 , i need this report today.",
+                [("25th march 2015", datetime.datetime(2015, 3, 25))],
+                settings={
+                    "PARSERS": [
+                        parser
+                        for parser in default_parsers
+                        if parser != "relative-time"
+                    ]
+                },
+            ),
+            param(
+                "en",
+                "25th march 2015 , i need this report today.",
+                [
+                    ("25th march 2015", datetime.datetime(2015, 3, 25)),
+                    ("today", datetime.datetime(2000, 1, 1)),
+                ],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            param(
+                "en",
+                "The employee has not submitted their documents till date",
+                [("till date", datetime.datetime(2000, 1, 1))],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Filipino / Tagalog
+            param(
+                "tl",
+                "Maraming namatay sa mga Hapon hanggang sila'y sumuko noong Agosto 15, 1945.",
+                [("noong Agosto 15, 1945", datetime.datetime(1945, 8, 15, 0, 0))],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Finnish
+            param(
+                "fi",
+                "Iso-Britannia ja Ranska julistivat sodan Saksalle 3. syyskuuta 1939.",
+                [("3. syyskuuta 1939", datetime.datetime(1939, 9, 3, 0, 0))],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # French
+            param(
+                "fr",
+                "La 2e Guerre mondiale, ou Deuxième Guerre mondiale4, est un conflit armé à "
+                "l'échelle planétaire qui dura du 1 septembre 1939 au 2 septembre 1945.",
+                [
+                    ("1 septembre 1939", datetime.datetime(1939, 9, 1, 0, 0)),
+                    ("2 septembre 1945", datetime.datetime(1945, 9, 2, 0, 0)),
+                ],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Hebrew
+            param(
+                "he",
+                'במרץ 1938 "אוחדה" אוסטריה עם גרמניה (אנשלוס). ',
+                [("במרץ 1938", datetime.datetime(1938, 3, 1, 0, 0))],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Hindi
+            param(
+                "hi",
+                "जुलाई 1937 में, मार्को-पोलो ब्रिज हादसे का बहाना लेकर जापान ने चीन पर हमला कर दिया और चीनी साम्राज्य "
+                "की राजधानी बीजिंग पर कब्जा कर लिया,",
+                [("जुलाई 1937 में", datetime.datetime(1937, 7, 1, 0, 0))],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Hungarian
+            param(
+                "hu",
+                "A háború Európában 1945. május 8-án Németország feltétel nélküli megadásával, "
+                "míg Ázsiában szeptember 2-án, Japán kapitulációjával fejeződött be.",
+                [
+                    ("1945. május 8-án", datetime.datetime(1945, 5, 8, 0, 0)),
+                    ("szeptember 2-án", datetime.datetime(2000, 9, 2, 0, 0)),
+                ],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Georgian
+            param(
+                "ka",
+                "1937 წელს დაიწყო იაპონია-ჩინეთის მეორე ომი.",
+                [("1937", datetime.datetime(1937, 1, 1, 0, 0))],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # German
+            param(
+                "de",
+                "Die UdSSR blieb gemäß dem Neutralitätspakt "
+                "vom 13. April 1941 gegenüber Japan vorerst neutral.",
+                [
+                    ("Die", datetime.datetime(1999, 12, 28, 0, 0)),
+                    ("13. April 1941", datetime.datetime(1941, 4, 13, 0, 0)),
+                ],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Indonesian
+            param(
+                "id",
+                "Kekaisaran Jepang menyerah pada tanggal 15 Agustus 1945, sehingga mengakhiri perang "
+                "di Asia dan memperkuat kemenangan total Sekutu atas Poros.",
+                [("tanggal 15 Agustus 1945", datetime.datetime(1945, 8, 15, 0, 0))],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Italian
+            param(
+                "it",
+                " Con questo il 2 ottobre 1935 prese il via la campagna "
+                "d'Etiopia. Il 9 maggio 1936 venne proclamato l'Impero. ",
+                [
+                    ("2 ottobre 1935", datetime.datetime(1935, 10, 2, 0, 0)),
+                    ("9 maggio 1936", datetime.datetime(1936, 5, 9, 0, 0)),
+                ],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Japanese
+            param(
+                "ja",
+                "1939年9月1日、ドイツ軍がポーランドへ侵攻したことが第二次世界大戦の始まりとされている。",
+                [("1939年9月1", datetime.datetime(1939, 9, 1, 0, 0))],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Korean
+            param(
+                "ko",
+                "회의는 2023년 2월 10일(금) 오후 3시 30분에 시작합니다",
+                [
+                    (
+                        "2023년 2월 10일(금) 오후 3시 30분에",
+                        datetime.datetime(2023, 2, 10, 15, 30),
+                    )
+                ],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Persian
+            param(
+                "fa",
+                "نگ جهانی دوم جنگ جدی بین سپتامبر 1939 و 2 سپتامبر 1945 بود.",
+                [
+                    ("سپتامبر 1939", datetime.datetime(1939, 9, 1, 0, 0)),
+                    ("2 سپتامبر 1945", datetime.datetime(1945, 9, 2, 0, 0)),
+                ],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Polish
+            param(
+                "pl",
+                "II wojna światowa – największa wojna światowa w historii, "
+                "trwająca od 1 września 1939 do 2 września 1945 (w Europie do 8 maja 1945)",
+                [
+                    ("1 września 1939", datetime.datetime(1939, 9, 1, 0, 0)),
+                    ("2 września 1945", datetime.datetime(1945, 9, 2, 0, 0)),
+                    ("8 maja 1945", datetime.datetime(1945, 5, 8, 0, 0)),
+                ],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Portuguese
+            param(
+                "pt",
+                "Em outubro de 1936, Alemanha e Itália formaram o Eixo Roma-Berlim.",
+                [("Em outubro de 1936", datetime.datetime(1936, 10, 1, 0, 0))],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Romanian
+            param(
+                "ro",
+                "Pe 17 septembrie 1939, după semnarea unui acord de încetare a focului cu Japonia, "
+                "sovieticii au invadat Polonia dinspre est.",
+                [("17 septembrie 1939", datetime.datetime(1939, 9, 17, 0, 0))],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Russian
+            param(
+                "ru",
+                "Втора́я мирова́я война́ (1 сентября 1939 — 2 сентября 1945) — "
+                "война двух мировых военно-политических коалиций, ставшая крупнейшим вооружённым "
+                "конфликтом в истории человечества.",
+                [
+                    ("1 сентября 1939", datetime.datetime(1939, 9, 1, 0, 0)),
+                    ("2 сентября 1945", datetime.datetime(1945, 9, 2, 0, 0)),
+                ],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Spanish
+            param(
+                "es",
+                "Desde finales de 1939 hasta inicios de 1941 Alemania conquistó o sometió "
+                "gran parte de la Europa continental.",
+                [
+                    ("de 1939", datetime.datetime(1939, 1, 1, 0, 0)),
+                    ("de 1941", datetime.datetime(1941, 1, 1, 0, 0)),
+                ],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            param(
+                "es",
+                "¡¡Ay!! En Madrid, a 17 de marzo de 1615. ¿Vos bueno?",
+                [("a 17 de marzo de 1615", datetime.datetime(1615, 3, 17, 0, 0))],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Swedish
+            param(
+                "sv",
+                "Efter kommunisternas seger 1922 drog de allierade och Japan bort sina trupper.",
+                [("1922", datetime.datetime(1922, 1, 1, 0, 0))],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Thai
+            param(
+                "th",
+                "และเมื่อวันที่ 11 พฤษภาคม 1939 "
+                "ญี่ปุ่นตัดสินใจขยายพรมแดนญี่ปุ่น-มองโกเลียขึ้นไปถึงแม่น้ำคัลคินกอลด้วยกำลัง",
+                [("11 พฤษภาคม 1939", datetime.datetime(1939, 5, 11, 0, 0))],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Turkish
+            param(
+                "tr",
+                "Almanya’nın Polonya’yı işgal ettiği 1 Eylül 1939 savaşın başladığı "
+                "tarih olarak genel kabul görür.",
+                [("1 Eylül 1939", datetime.datetime(1939, 9, 1, 0, 0))],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Ukrainian
+            param(
+                "uk",
+                "Інші дати, що розглядаються деякими авторами як дати початку війни: початок японської "
+                "інтервенції в Маньчжурію 13 вересня 1931, початок другої японсько-китайської війни 7 "
+                "липня 1937 року та початок угорсько-української війни 14 березня 1939 року.",
+                [
+                    ("13 вересня 1931", datetime.datetime(1931, 9, 13, 0, 0)),
+                    ("7 липня 1937 року", datetime.datetime(1937, 7, 7, 0, 0)),
+                    ("14 березня 1939 року", datetime.datetime(1939, 3, 14, 0, 0)),
+                ],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+            # Vietnamese
+            param(
+                "vi",
+                "Ý theo gương Đức, đã tiến hành xâm lược Ethiopia năm 1935 và sát "
+                "nhập Albania vào ngày 12 tháng 4 năm 1939.",
+                [
+                    ("năm 1935", datetime.datetime(1935, 1, 1, 0, 0)),
+                    ("ngày 12 tháng 4 năm 1939", datetime.datetime(1939, 4, 12, 0, 0)),
+                ],
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+            ),
+        ]
+    )
+    @apply_settings
+    def test_search_and_parse(
+        self,
+        shortname: str,
+        string: str,
+        expected: list[tuple[str, datetime.datetime]],
+        settings: Settings | dict[str, Any] | None = None,
+    ) -> None:
+        assert isinstance(settings, Settings)
+        result = self.exact_language_search.search_parse(
+            shortname, string, settings=settings
+        )
+        self.assertEqual([date[:2] for date in result], expected)
+
+    @parameterized.expand(
+        [
+            param(
+                "en",
+                "between Friday and Monday",
+                [
+                    ("Friday", datetime.datetime(1999, 12, 31, 0, 0)),
+                    ("Monday", datetime.datetime(1999, 12, 27, 0, 0)),
+                ],
+            ),
+            param(
+                "en",
+                "Sept 1st and Oct 10th",
+                [
+                    ("Sept 1st", datetime.datetime(2000, 9, 1, 0, 0)),
+                    ("Oct 10th", datetime.datetime(2000, 10, 10, 0, 0)),
+                ],
+            ),
+            param(
+                "es",
+                "1 de junio de 1998 y 5 de julio de 1999",
+                [
+                    ("1 de junio de 1998", datetime.datetime(1998, 6, 1, 0, 0)),
+                    ("5 de julio de 1999", datetime.datetime(1999, 7, 5, 0, 0)),
+                ],
+            ),
+            param(
+                "de",
+                "Freitag und Montag",
+                [
+                    ("Freitag", datetime.datetime(1999, 12, 31, 0, 0)),
+                    ("Montag", datetime.datetime(1999, 12, 27, 0, 0)),
+                ],
+            ),
+        ]
+    )
+    @apply_settings
+    def test_search_dates_joined_by_skipped_words(
+        self,
+        shortname: str,
+        string: str,
+        expected: list[tuple[str, datetime.datetime]],
+        settings: Settings | dict[str, Any] | None = None,
+    ) -> None:
+        assert isinstance(settings, Settings)
+        settings = settings.replace(RELATIVE_BASE=datetime.datetime(2000, 1, 1))
+        result = self.exact_language_search.search_parse(
+            shortname, string, settings=settings
+        )
+        self.assertEqual([date[:2] for date in result], expected)
+
+    @parameterized.expand(
+        [
+            # English
+            param(
+                "en",
+                "January 3, 2017 - February 1st",
+                [
+                    ("January 3, 2017", datetime.datetime(2017, 1, 3, 0, 0)),
+                    ("February 1st", datetime.datetime(2017, 2, 1, 0, 0)),
+                ],
+            ),
+            param(
+                "en",
+                "2014 was good! October was excellent! Friday, 21 was especially good!",
+                [
+                    ("2014", datetime.datetime(2014, today.month, today.day, 0, 0)),
+                    ("October", datetime.datetime(2014, 10, today.day, 0, 0)),
+                    ("Friday, 21", datetime.datetime(2014, 10, 21, 0, 0)),
+                ],
+            ),
+            param(
+                "en",
+                """May 2020
+                    July 2020
+                    2023
+                    January UTC
+                    June 5 am utc
+                    June 23th 5 pm EST
+                    May 31, 8am UTC""",
+                [
+                    (
+                        "May 2020",
+                        datetime.datetime(
+                            2020,
+                            5,
+                            today.day,
+                            0,
+                            0,
+                        ),
+                    ),
+                    (
+                        "July 2020",
+                        datetime.datetime(
+                            2020,
+                            7,
+                            today.day,
+                            0,
+                            0,
+                        ),
+                    ),
+                    (
+                        "2023",
+                        datetime.datetime(
+                            2023,
+                            7,
+                            today.day,
+                            0,
+                            0,
+                        ),
+                    ),
+                    (
+                        "January UTC",
+                        datetime.datetime(
+                            2023,
+                            1,
+                            today.day,
+                            0,
+                            0,
+                            tzinfo=pytz.utc,
+                        ),
+                    ),
+                    (
+                        "June 5 am utc",
+                        datetime.datetime(
+                            2023,
+                            6,
+                            # June has no 31st.
+                            min(today.day, 30),
+                            5,
+                            0,
+                            tzinfo=pytz.utc,
+                        ),
+                    ),
+                    (
+                        "June 23th 5 pm EST",
+                        datetime.datetime(
+                            2023,
+                            6,
+                            23,
+                            17,
+                            0,
+                            tzinfo=datetime.timezone(
+                                datetime.timedelta(hours=-5), name="EST"
+                            ),
+                        ),
+                    ),
+                    (
+                        "May 31, 8am UTC",
+                        datetime.datetime(2023, 5, 31, 8, 0, tzinfo=pytz.utc),
+                    ),
+                ],
+            ),
+            # Russian
+            param(
+                "ru",
+                "19 марта 2001 был хороший день. 20 марта тоже был хороший день. 21 марта был отличный день.",
+                [
+                    ("19 марта 2001", datetime.datetime(2001, 3, 19, 0, 0)),
+                    ("20 марта", datetime.datetime(2001, 3, 20, 0, 0)),
+                    ("21 марта", datetime.datetime(2001, 3, 21, 0, 0)),
+                ],
+            ),
+            param(
+                "ru",
+                "Андрей Дмитриевич Сахаров скончался 14 декабря в 1989 году от внезапной остановки сердца.",
+                [("14 декабря в 1989 году", datetime.datetime(1989, 12, 14, 0, 0))],
+            ),
+            # relative dates
+            param(
+                "ru",
+                "19 марта 2001. Сегодня был хороший день. 2 дня назад был хороший день. "
+                "Вчера тоже был хороший день.",
+                [
+                    ("19 марта 2001", datetime.datetime(2001, 3, 19, 0, 0)),
+                    ("Сегодня", datetime.datetime(2001, 3, 19, 0, 0)),
+                    ("2 дня назад", datetime.datetime(2001, 3, 17, 0, 0)),
+                    ("Вчера", datetime.datetime(2001, 3, 18, 0, 0)),
+                ],
+            ),
+            param(
+                "ru",
+                "19 марта 2001. Сегодня был хороший день. Два дня назад был хороший день. Хорошая была неделя. "
+                "Думаю, через неделю будет еще лучше.",
+                [
+                    ("19 марта 2001", datetime.datetime(2001, 3, 19, 0, 0)),
+                    ("Сегодня", datetime.datetime(2001, 3, 19, 0, 0)),
+                    ("Два дня назад", datetime.datetime(2001, 3, 17, 0, 0)),
+                    ("через неделю", datetime.datetime(2001, 3, 26, 0, 0)),
+                ],
+            ),
+            # Hungarian
+            param(
+                "hu",
+                "1962 augusztus 11 Föld körüli pályára bocsátották a szovjet Vosztok-3 űrhajót, "
+                "mely páros űrrepülést hajtott végre a másnap föld körüli pályára bocsátott Vosztok-4-gyel."
+                "2 hónappal ezelőtt furcsa, nem forgó jellegű szédülést tapasztaltam.",
+                [
+                    ("1962 augusztus 11", datetime.datetime(1962, 8, 11, 0, 0)),
+                    ("2 hónappal ezelőtt", datetime.datetime(1962, 6, 11, 0, 0)),
+                ],
+            ),
+            # Vietnamese
+            param(
+                "vi",
+                "1/1/1940. Vào tháng 8 năm 1940, với lực lượng lớn của Pháp tại Bắc Phi chính thức trung lập "
+                "trong cuộc chiến, Ý mở một cuộc tấn công vào thuộc địa Somalia của Anh tại Đông Phi. "
+                "Đến tháng 9 quân Ý vào đến Ai Cập (cũng đang dưới sự kiểm soát của Anh). ",
+                [
+                    ("1/1/1940", datetime.datetime(1940, 1, 1, 0, 0)),
+                    ("tháng 8 năm 1940", datetime.datetime(1940, 8, 1, 0, 0)),
+                    ("tháng 9", datetime.datetime(1940, 9, 1, 0, 0)),
+                ],
+            ),
+        ]
+    )
+    @apply_settings
+    def test_relative_base_setting(
+        self,
+        shortname: str,
+        string: str,
+        expected: list[tuple[str, datetime.datetime]],
+        settings: Settings | dict[str, Any] | None = None,
+    ) -> None:
+        assert isinstance(settings, Settings)
+        result = self.exact_language_search.search_parse(
+            shortname, string, settings=settings
+        )
+        self.assertEqual([date[:2] for date in result], expected)
+
+    @parameterized.expand(
+        [
+            # English
+            param(
+                "en",
+                "July 12th, 2014. July 13th, July 14th",
+                [
+                    ("July 12th, 2014", datetime.datetime(2014, 7, 12, 0, 0)),
+                    ("July 13th", datetime.datetime(2014, 7, 13, 0, 0)),
+                    ("July 14th", datetime.datetime(2014, 7, 14, 0, 0)),
+                ],
+            ),
+            param(
+                "en",
+                "2014. July 13th July 14th",
+                [
+                    ("2014", datetime.datetime(2014, today.month, today.day, 0, 0)),
+                    ("July 13th", datetime.datetime(2014, 7, 13, 0, 0)),
+                    ("July 14th", datetime.datetime(2014, 7, 14, 0, 0)),
+                ],
+            ),
+            param(
+                "en",
+                "July 13th 2014 July 14th 2014",
+                [
+                    ("July 13th 2014", datetime.datetime(2014, 7, 13, 0, 0)),
+                    ("July 14th 2014", datetime.datetime(2014, 7, 14, 0, 0)),
+                ],
+            ),
+            param(
+                "en",
+                "July 13th 2014 July 14th",
+                [
+                    ("July 13th 2014", datetime.datetime(2014, 7, 13, 0, 0)),
+                    ("July 14th", datetime.datetime(2014, 7, 14, 0, 0)),
+                ],
+            ),
+            param(
+                "en",
+                "July 13th, 2014 July 14th, 2014",
+                [
+                    ("July 13th, 2014", datetime.datetime(2014, 7, 13, 0, 0)),
+                    ("July 14th, 2014", datetime.datetime(2014, 7, 14, 0, 0)),
+                ],
+            ),
+            param(
+                "en",
+                "2014. July 12th, July 13th, July 14th",
+                [
+                    ("2014", datetime.datetime(2014, today.month, today.day, 0, 0)),
+                    ("July 12th", datetime.datetime(2014, 7, 12, 0, 0)),
+                    ("July 13th", datetime.datetime(2014, 7, 13, 0, 0)),
+                    ("July 14th", datetime.datetime(2014, 7, 14, 0, 0)),
+                ],
+            ),
+            # Swedish
+            param(
+                "sv",
+                "1938–1939 marscherade tyska soldater i Österrike samtidigt som "
+                "österrikiska soldater marscherade i Berlin.",
+                [
+                    ("1938", datetime.datetime(1938, today.month, today.day, 0, 0)),
+                    ("1939", datetime.datetime(1939, today.month, today.day, 0, 0)),
+                ],
+            ),
+            # German
+            param(
+                "de",
+                "Verteidiger der Stadt kapitulierten am 2. Mai 1945. Am 8. Mai 1945 (VE-Day) trat "
+                "bedingungslose Kapitulation der Wehrmacht in Kraft",
+                [
+                    ("am 2. Mai 1945", datetime.datetime(1945, 5, 2, 0, 0)),
+                    ("Am 8. Mai 1945", datetime.datetime(1945, 5, 8, 0, 0)),
+                ],
+            ),
+        ]
+    )
+    @apply_settings
+    def test_splitting_of_not_parsed(
+        self,
+        shortname: str,
+        string: str,
+        expected: list[tuple[str, datetime.datetime]],
+        settings: Settings | dict[str, Any] | None = None,
+    ) -> None:
+        assert isinstance(settings, Settings)
+        result = self.exact_language_search.search_parse(
+            shortname, string, settings=settings
+        )
+        self.assertEqual([date[:2] for date in result], expected)
+
+    @parameterized.expand(
+        [
+            # Arabic
+            param(
+                "ar",
+                "في 29 يوليو 1938 غزت القوات اليابانية الاتحاد"
+                " السوفييتي ووقعت أولى المعارك والتي انتصر فيها السوفييت، وعلى الرغم من ذلك رفضت"
+                " اليابان الاعتراف بذلك وقررت في 11 مايو 1939 تحريك الحدود المنغولية حتى نهر غول،",
+            ),
+            param("ar", "08 أكتوبر 2020 08:15 م"),
+            # Belarusian
+            param(
+                "be",
+                "Пасля апублікавання Патсдамскай дэкларацыі 26 ліпеня 1945 года і адмовы Японіі капітуляваць "
+                "на яе ўмовах ЗША скінулі атамныя бомбы.",
+            ),
+            # Bulgarian
+            param(
+                "bg",
+                "На 16 юни 1944 г. започват въздушни "
+                "бомбардировки срещу Япония, използувайки новозавладените острови като бази.",
+            ),
+            # Chinese
+            param(
+                "zh",
+                "不過大多數人仍多把第二次世界大戰的爆發定為1939年9月1日德國入侵波蘭開始，2015年04月08日10点05。",
+            ),
+            # Czech
+            param(
+                "cs",
+                "V rok 1920 byla proto vytvořena Společnost národů, jež měla fungovat jako fórum, "
+                "na němž měly národy mírovým způsobem urovnávat svoje spory.",
+            ),
+            # Danish
+            param(
+                "da",
+                "Krigen i Europa begyndte den 1. september 1939, da Nazi-Tyskland invaderede Polen, "
+                "og endte med Nazi-Tysklands betingelsesløse overgivelse den 8. marts 1945.",
+            ),
+            # Dutch
+            param(
+                "nl",
+                " De meest dramatische uitbreiding van het conflict vond plaats op Maandag 22 juni 1941  met de "
+                "Duitse aanval op de Sovjet-Unie.",
+            ),
+            # English
+            param("en", "I will meet you tomorrow at noon"),
+            # Filipino / Tagalog
+            param(
+                "tl",
+                "Maraming namatay sa mga Hapon hanggang sila'y sumuko noong Agosto 15, 1945.",
+            ),
+            # Finnish
+            param(
+                "fi",
+                "Iso-Britannia ja Ranska julistivat sodan Saksalle 3. syyskuuta 1939.",
+            ),
+            # French
+            param(
+                "fr",
+                "La Seconde Guerre mondiale, ou Deuxième Guerre mondiale4, est un conflit armé à "
+                "l'échelle planétaire qui dura du 1 septembre 1939 au 2 septembre 1945.",
+            ),
+            # Hebrew
+            param("he", 'במרץ 1938 "אוחדה" אוסטריה עם גרמניה (אנשלוס). '),
+            # Hindi
+            param(
+                "hi",
+                "जुलाई 1937 में, मार्को-पोलो ब्रिज हादसे का बहाना लेकर जापान ने चीन पर हमला कर दिया और चीनी साम्राज्य "
+                "की राजधानी बीजिंग पर कब्जा कर लिया,",
+            ),
+            # Hungarian
+            param(
+                "hu",
+                "A háború Európában 1945. május 8-án Németország feltétel nélküli megadásával, "
+                "míg Ázsiában szeptember 2-án, Japán kapitulációjával fejeződött be.",
+            ),
+            # Georgian
+            param("ka", "1937 წელს დაიწყო იაპონია-ჩინეთის მეორე ომი."),
+            # German
+            param(
+                "de",
+                "Die UdSSR blieb dem Neutralitätspakt "
+                "vom 13. April 1941 gegenüber Japan vorerst neutral.",
+            ),
+            # Indonesian
+            param(
+                "id",
+                "Kekaisaran Jepang menyerah pada tanggal 15 Agustus 1945, sehingga mengakhiri perang "
+                "di Asia dan memperkuat kemenangan total Sekutu atas Poros.",
+            ),
+            # Italian
+            param(
+                "it",
+                " Con questo il 2 ottobre 1935 prese il via la campagna "
+                "d'Etiopia. Il 9 maggio 1936 venne proclamato l'Impero. ",
+            ),
+            # Japanese
+            param(
+                "ja",
+                "1933年（昭和8年）12月23日午前6時39分、宮城（現：皇居）内の産殿にて誕生。",
+            ),
+            # Persian
+            param("fa", "نگ جهانی دوم جنگ جدی بین سپتامبر 1939 و 2 سپتامبر 1945 بود."),
+            param("fa", "10 اکتوبر 2020"),
+            # Polish
+            param(
+                "pl",
+                "II wojna światowa – największa wojna światowa w historii, "
+                "trwająca od 1 września 1939 do 2 września 1945 (w Europie do 8 maja 1945)",
+            ),
+            # Portuguese
+            param(
+                "pt",
+                "Em outubro de 1936, Alemanha e Itália formaram o Eixo Roma-Berlim.",
+            ),
+            # Romanian
+            param(
+                "ro",
+                "Pe 17 septembrie 1939, după semnarea unui acord de încetare a focului cu Japonia, "
+                "sovieticii au invadat Polonia dinspre est.",
+            ),
+            # Russian
+            param(
+                "ru",
+                "Втора́я мирова́я война́ (1 сентября 1939 — 2 сентября 1945) — "
+                "война двух мировых военно-политических коалиций, ставшая крупнейшим вооружённым "
+                "конфликтом в истории человечества.",
+            ),
+            # Spanish
+            param("es", "11 junio 2010"),
+            param("es", "¡¡Ay!! En Madrid, a 17 de marzo de 1615. ¿Vos bueno?"),
+            # Swedish
+            param("sv", " den 15 augusti 1945 då Kejsardömet"),
+            # Thai
+            param(
+                "th",
+                "และเมื่อวันที่ 11 พฤษภาคม 1939 "
+                "ญี่ปุ่นตัดสินใจขยายพรมแดนญี่ปุ่น-มองโกเลียขึ้นไปถึงแม่น้ำคัลคินกอลด้วยกำลัง",
+            ),
+            # Turkish
+            param(
+                "tr",
+                "Almanya’nın Polonya’yı işgal ettiği 1 Eylül 1939 savaşın başladığı "
+                "tarih olarak genel kabul görür.",
+            ),
+            # Ukrainian
+            param(
+                "uk",
+                "Інші дати, що розглядаються деякими авторами як дати початку війни: початок японської "
+                "інтервенції в Маньчжурію 13 вересня 1931, початок другої японсько-китайської війни 7 "
+                "липня 1937 року та початок угорсько-української війни 14 березня 1939 року.",
+            ),
+            # Vietnamese
+            param(
+                "vi",
+                "Ý theo gương Đức, đã tiến hành xâm lược Ethiopia năm 1935 và sát "
+                "nhập Albania vào ngày 12 tháng 4 năm 1939.",
+            ),
+            # Kana are Japanese, even next to a Chinese word such as 後天
+            param("ja", "後天的な要因"),
+            # Only digits
+            param("en", "2007"),
+        ]
+    )
+    def test_detection(self, shortname: str, text: str) -> None:
+        result = self.search_with_detection.detect_language(text, languages=None)
+        self.assertEqual(result, shortname)
+
+    @parameterized.expand(
+        [
+            param(
+                text="19 марта 2001 был хороший день. 20 марта тоже был хороший день. 21 марта был отличный день.",
+                languages=["en", "ru"],
+                settings=None,
+                expected=[
+                    ("19 марта 2001", datetime.datetime(2001, 3, 19, 0, 0)),
+                    ("20 марта", datetime.datetime(2001, 3, 20, 0, 0)),
+                    ("21 марта", datetime.datetime(2001, 3, 21, 0, 0)),
+                ],
+            ),
+            param(
+                text="Em outubro de 1936, Alemanha e Itália formaram o Eixo Roma-Berlim.",
+                languages=None,
+                settings={"RELATIVE_BASE": datetime.datetime(2000, 1, 1)},
+                expected=[("Em outubro de 1936", datetime.datetime(1936, 10, 1, 0, 0))],
+            ),
+            param(
+                text="19 марта 2001, 20 марта, 21 марта был отличный день.",
+                languages=["en", "ru"],
+                settings=None,
+                expected=[
+                    ("19 марта 2001", datetime.datetime(2001, 3, 19, 0, 0)),
+                    ("20 марта", datetime.datetime(2001, 3, 20, 0, 0)),
+                    ("21 марта", datetime.datetime(2001, 3, 21, 0, 0)),
+                ],
+            ),
+            param(
+                text="um 10 Uhr am 5. Mai 2021",
+                languages=["de"],
+                settings=None,
+                expected=[
+                    ("um 10 Uhr am 5. Mai 2021", datetime.datetime(2021, 5, 5, 10, 0))
+                ],
+            ),
+            param(
+                text="Er wurde 1990 am 3. März in Berlin geboren",
+                languages=["de"],
+                settings=None,
+                expected=[("1990 am 3. März in", datetime.datetime(1990, 3, 3, 0, 0))],
+            ),
+            # Dates not found
+            param(text="", languages=None, settings=None, expected=None),
+            # Language not detected
+            param(text="Привет", languages=["en"], settings=None, expected=None),
+            # ZeroDivisionError
+            param(
+                text="DECEMBER 21 19.87 87",
+                languages=None,
+                settings=None,
+                expected=[("DECEMBER 21 19", datetime.datetime(2019, 12, 21, 0, 0))],
+            ),
+            # Full stops between digits
+            param(
+                text="Sampled on 2019-10-19 20:28:35.973000 by the sensor",
+                languages=None,
+                settings=None,
+                expected=[
+                    (
+                        "2019-10-19 20:28:35.973000",
+                        datetime.datetime(2019, 10, 19, 20, 28, 35, 973000),
+                    )
+                ],
+            ),
+            param(
+                text="test 13.07.2016 test",
+                languages=None,
+                settings=None,
+                expected=[("13.07.2016", datetime.datetime(2016, 7, 13, 0, 0))],
+            ),
+            param(
+                text="bonjour, pouvez vous me joindre svp par telephone 08 11 58 54 41",
+                languages=None,
+                settings={"STRICT_PARSING": True},
+                expected=None,
+            ),
+            param(
+                text="Date de facture 23 juillet 2020 Condition Redevable livraison FR",
+                languages=["en", "fr", "es", "pt", "de", "it", "ar"],
+                settings={"STRICT_PARSING": True},
+                expected=[("23 juillet 2020", datetime.datetime(2020, 7, 23, 0, 0))],
+            ),
+            param(
+                text="Bubble -58.5 06 Mar 2009 in need of -43.4 30 Oct 1974",
+                languages=["en"],
+                settings={"STRICT_PARSING": True},
+                expected=[
+                    ("06 Mar 2009 in", datetime.datetime(2009, 3, 6, 0, 0)),
+                    ("30 Oct 1974", datetime.datetime(1974, 10, 30, 0, 0)),
+                ],
+            ),
+            param(
+                text="The conference is June 12-14, 2021 in Boston.",
+                languages=["en"],
+                settings=None,
+                expected=[
+                    ("June 12-14, 2021 in", datetime.datetime(2021, 6, 12, 0, 0))
+                ],
+            ),
+            param(text="a Americ", languages=None, settings=None, expected=None),
+            param(
+                text="in the sample papers. The year of mention refers ",
+                languages=None,
+                settings=None,
+                expected=None,
+            ),
+            # Date with comma and apostrophe
+            param(
+                text="9/3/2017  , ",
+                languages=["en"],
+                settings=None,
+                expected=[("9/3/2017", datetime.datetime(2017, 9, 3, 0, 0))],
+            ),
+            param(
+                text="9/3/2017  ' ",
+                languages=["en"],
+                settings=None,
+                expected=[("9/3/2017", datetime.datetime(2017, 9, 3, 0, 0))],
+            ),
+            # Number words without a time unit
+            param(
+                text="She turned thirty on 14 February 2018.",
+                languages=["en"],
+                settings=None,
+                expected=[
+                    ("on 14 February 2018", datetime.datetime(2018, 2, 14, 0, 0))
+                ],
+            ),
+            param(
+                text="Chapter Twenty: The return. It was 5 June 2019.",
+                languages=["en"],
+                settings=None,
+                expected=[("5 June 2019", datetime.datetime(2019, 6, 5, 0, 0))],
+            ),
+            param(
+                text="Twenty second street meeting on 5 June 2019.",
+                languages=["en"],
+                settings=None,
+                expected=[("on 5 June 2019", datetime.datetime(2019, 6, 5, 0, 0))],
+            ),
+            param(
+                text="Twenty five years after the Sept. 11, 2001, attacks",
+                languages=["en"],
+                settings={"RELATIVE_BASE": datetime.datetime(2020, 6, 15, 12)},
+                expected=[("11, 2001", datetime.datetime(2001, 11, 15, 0, 0))],
+            ),
+            param(
+                text="Sep 15, 2026 10:50 AM Fifty years after Paris",
+                languages=["en"],
+                settings={"RELATIVE_BASE": datetime.datetime(2020, 6, 15, 12)},
+                expected=[
+                    ("Sep 15, 2026 10:50 AM", datetime.datetime(2026, 9, 15, 10, 50)),
+                    ("Fifty years after", datetime.datetime(2070, 6, 15, 12, 0)),
+                ],
+            ),
+            param(
+                text="Sep 15, 2026 10:50 AM and fifty years after Paris",
+                languages=["en"],
+                settings={"RELATIVE_BASE": datetime.datetime(2020, 6, 15, 12)},
+                expected=[
+                    ("Sep 15, 2026 10:50 AM", datetime.datetime(2026, 9, 15, 10, 50)),
+                    ("fifty years after", datetime.datetime(2070, 6, 15, 12, 0)),
+                ],
+            ),
+            param(
+                text="On 5 June 2019, 50 years ago",
+                languages=["en"],
+                settings={"RELATIVE_BASE": datetime.datetime(2020, 6, 15, 12)},
+                expected=[
+                    ("On 5 June 2019", datetime.datetime(2019, 6, 5, 0, 0)),
+                    ("50 years ago", datetime.datetime(1970, 6, 15, 12, 0)),
+                ],
+            ),
+            param(
+                text="09.09.2026 10711 Seventy-Five Seconds, Forty Years of History",
+                languages=["en"],
+                settings={"RELATIVE_BASE": datetime.datetime(2020, 6, 15, 12)},
+                expected=[
+                    ("09.09.2026", datetime.datetime(2026, 9, 9, 0, 0)),
+                    ("Forty Years of", datetime.datetime(1980, 6, 15, 12, 0)),
+                ],
+            ),
+            param(
+                text="时间是下午3:30",
+                languages=["zh-Hans"],
+                settings={"RELATIVE_BASE": datetime.datetime(2020, 6, 15, 12)},
+                expected=[("下午3:30", datetime.datetime(2020, 6, 15, 15, 30))],
+            ),
+            param(
+                text="禮拜一在會議室開會，時間是下午3:30",
+                languages=None,
+                settings={"RELATIVE_BASE": datetime.datetime(2020, 6, 15, 12)},
+                expected=[
+                    ("禮拜一", datetime.datetime(2020, 6, 15, 0, 0)),
+                    ("下午3:30", datetime.datetime(2020, 6, 15, 15, 30)),
+                ],
+            ),
+            param(
+                text="最後更新於3小時前",
+                languages=["zh-Hant"],
+                settings={"RELATIVE_BASE": datetime.datetime(2020, 6, 15, 12)},
+                expected=[("3小時前", datetime.datetime(2020, 6, 15, 9, 0))],
+            ),
+            param(
+                text="日期：2020年12月28日 上午10:07",
+                languages=["zh-Hant"],
+                settings=None,
+                expected=[
+                    ("2020年12月28日 上午10:07", datetime.datetime(2020, 12, 28, 10, 7))
+                ],
+            ),
+            param(
+                text="：2021年02月04日 17:17",
+                languages=["zh-Hant"],
+                settings=None,
+                expected=[
+                    ("2021年02月04日 17:17", datetime.datetime(2021, 2, 4, 17, 17))
+                ],
+            ),
+            param(
+                text="我们大后天见面",
+                languages=["zh"],
+                settings={"RELATIVE_BASE": datetime.datetime(2020, 6, 15, 12)},
+                expected=[("大后天", datetime.datetime(2020, 6, 18, 12, 0))],
+            ),
+            param(
+                text="后天性免疫缺陷综合征",
+                languages=["zh"],
+                settings=None,
+                expected=None,
+            ),
+            param(
+                text="1 小时前",
+                languages=["zh"],
+                settings={"RELATIVE_BASE": datetime.datetime(2020, 6, 15, 12)},
+                expected=[("1 小时前", datetime.datetime(2020, 6, 15, 11, 0))],
+            ),
+            param(
+                text="3時間前に更新",
+                languages=["ja"],
+                settings={"RELATIVE_BASE": datetime.datetime(2020, 6, 15, 12)},
+                expected=[("3時間前", datetime.datetime(2020, 6, 15, 9, 0))],
+            ),
+            param(
+                text="他在2020年去了北京",
+                languages=["zh-Hant"],
+                settings={"RELATIVE_BASE": datetime.datetime(2020, 6, 15, 12)},
+                expected=[("2020年", datetime.datetime(2020, 6, 15, 0, 0))],
+            ),
+        ]
+    )
+    def test_date_search_function(
+        self,
+        text: str,
+        languages: list[str] | None,
+        settings: dict[str, Any] | None,
+        expected: list[tuple[str, datetime.datetime]] | None,
+    ) -> None:
+        result = search_dates(text, languages=languages, settings=settings)
+        self.assertEqual(result, expected)
+
+    @parameterized.expand(
+        [
+            # The comma used to be what told the expression and the date apart
+            param(
+                text="Today 13 Feb 2020",
+                languages=["en"],
+                expected=[
+                    ("Today", relative_base),
+                    ("13 Feb 2020", datetime.datetime(2020, 2, 13, 0, 0)),
+                ],
+            ),
+            param(
+                text="Today, 13 Feb 2020",
+                languages=["en"],
+                expected=[
+                    ("Today", relative_base),
+                    ("13 Feb 2020", datetime.datetime(2020, 2, 13, 0, 0)),
+                ],
+            ),
+            # The expression written after the date instead of before it
+            param(
+                text="13 Feb 2020 Today",
+                languages=["en"],
+                expected=[
+                    ("13 Feb 2020", datetime.datetime(2020, 2, 13, 0, 0)),
+                    ("Today", relative_base),
+                ],
+            ),
+            # An expression translated into "in 1 day" instead of "0 day ago"
+            param(
+                text="Tomorrow 13 Feb 2020",
+                languages=["en"],
+                expected=[
+                    ("Tomorrow", datetime.datetime(2020, 2, 14, 20, 7, 6)),
+                    ("13 Feb 2020", datetime.datetime(2020, 2, 13, 0, 0)),
+                ],
+            ),
+            param(
+                text="hoy 13 feb 2020",
+                languages=["es"],
+                expected=[
+                    ("hoy", relative_base),
+                    ("13 feb 2020", datetime.datetime(2020, 2, 13, 0, 0)),
+                ],
+            ),
+            # "and" is written by the text but not by its translation, so the
+            # words left of the expression no longer line up with the ones
+            # they were translated from
+            param(
+                text="Today 13 Feb 2020 and 14 Mar 2021",
+                languages=["en"],
+                expected=None,
+            ),
+            # Two expressions next to each other make a single one
+            param(
+                text="3 days ago tomorrow 13 Feb 2020",
+                languages=["en"],
+                expected=[
+                    ("3 days ago tomorrow", datetime.datetime(2020, 2, 14, 20, 7, 6)),
+                    ("13 Feb 2020", datetime.datetime(2020, 2, 13, 0, 0)),
+                ],
+            ),
+            # Parsed together, the expression would hide the numeric date
+            param(
+                text="09/28/2019 22 hrs ago",
+                languages=["en"],
+                expected=[
+                    ("09/28/2019", datetime.datetime(2019, 9, 28, 0, 0)),
+                    ("22 hrs ago", relative_base - timedelta(hours=22)),
+                ],
+            ),
+            # "mo" alone would also translate into "month"
+            param(
+                text="in 15 months 4/3/2019",
+                languages=["en"],
+                expected=[
+                    ("in 15 months", datetime.datetime(2021, 5, 13, 20, 7, 6)),
+                    ("4/3/2019", datetime.datetime(2019, 4, 3, 0, 0)),
+                ],
+            ),
+            param(
+                text="2020年9月1日後天",
+                languages=["zh-Hant"],
+                expected=[
+                    ("2020年9月1日", datetime.datetime(2020, 9, 1, 0, 0)),
+                    ("後天", relative_base + timedelta(days=2)),
+                ],
+            ),
+            param(
+                text="2020年9月1日 2天前",
+                languages=["zh"],
+                expected=[
+                    ("2020年9月1日", datetime.datetime(2020, 9, 1, 0, 0)),
+                    ("2天前", relative_base - timedelta(days=2)),
+                ],
+            ),
+            param(
+                text="後天，2020/9/1",
+                languages=["zh-Hant"],
+                expected=[
+                    ("後天", relative_base + timedelta(days=2)),
+                    ("2020/9/1", datetime.datetime(2020, 9, 1, 0, 0)),
+                ],
+            ),
+            # Without a space, the day of the date and the number of days of
+            # the expression would read as a single number
+            param(
+                text="2020-09-01大前天",
+                languages=["zh"],
+                expected=[
+                    ("2020-09-01", datetime.datetime(2020, 9, 1, 0, 0)),
+                    ("大前天", relative_base - timedelta(days=3)),
+                ],
+            ),
+            # Cutting "today" off would leave "13 feb 2020 before", which is no
+            # longer a date, so the expression was not written next to one
+            param(
+                text="13 feb 2020 before today",
+                languages=["en"],
+                expected=None,
+            ),
+        ]
+    )
+    def test_search_dates_with_a_relative_expression_next_to_a_date(
+        self,
+        text: str,
+        languages: list[str],
+        expected: list[tuple[str, datetime.datetime]],
+    ) -> None:
+        result = search_dates(
+            text, languages=languages, settings={"RELATIVE_BASE": relative_base}
+        )
+        self.assertEqual(result, expected)
+
+    @parameterized.expand(
+        [
+            # The word a future expression is written with is what points it
+            # forward, and reporting it is what tells the two directions apart
+            param(
+                text="через 2 часа",
+                languages=["ru"],
+                expected=[("через 2 часа", relative_base + timedelta(hours=2))],
+            ),
+            # The unit is written next to a comma, which used to keep it from
+            # being read as the unit of a future expression
+            param(
+                text="через 2 часа, пожалуйста",
+                languages=["ru"],
+                expected=[("через 2 часа", relative_base + timedelta(hours=2))],
+            ),
+            param(
+                text="Позвони мне через 2 часа, пожалуйста",
+                languages=["ru"],
+                expected=[("через 2 часа", relative_base + timedelta(hours=2))],
+            ),
+            param(
+                text="через 3 дня, пожалуйста",
+                languages=["ru"],
+                expected=[("через 3 дня", relative_base + timedelta(days=3))],
+            ),
+            # A past expression is written with its own word and keeps pointing
+            # back, comma or not
+            param(
+                text="2 часа назад",
+                languages=["ru"],
+                expected=[("2 часа назад", relative_base - timedelta(hours=2))],
+            ),
+            param(
+                text="2 часа назад, пожалуйста",
+                languages=["ru"],
+                expected=[("2 часа назад", relative_base - timedelta(hours=2))],
+            ),
+            # The expression is translated into English before it is parsed, so
+            # the comma reaches the same code whatever it was written in
+            param(
+                text="in 2 hours, please",
+                languages=["en"],
+                expected=[("in 2 hours", relative_base + timedelta(hours=2))],
+            ),
+            # Not only a comma: any punctuation the translation carries on the
+            # unit. ``parse`` already reads this one as a future date
+            param(
+                text="in three weeks' time",
+                languages=["en"],
+                expected=[("in three weeks", relative_base + timedelta(weeks=3))],
+            ),
+        ]
+    )
+    def test_search_dates_with_a_relative_expression_reads_its_direction(
+        self,
+        text: str,
+        languages: list[str],
+        expected: list[tuple[str, datetime.datetime]],
+    ) -> None:
+        result = search_dates(
+            text, languages=languages, settings={"RELATIVE_BASE": relative_base}
+        )
+        self.assertEqual(result, expected)
+
+    @parameterized.expand(
+        [
+            param(
+                text="I will be there next Tuesday.",
+                expected=[("next Tuesday", datetime.datetime(2026, 9, 29), "en")],
+            ),
+            param(
+                text="11 Mai 2014",
+                expected=[("11 Mai 2014", datetime.datetime(2014, 5, 11), "fr")],
+            ),
+            param(
+                text="Le 11 Décembre 2014 à 09:00",
+                expected=[
+                    (
+                        "Le 11 Décembre 2014 à 09:00",
+                        datetime.datetime(2014, 12, 11, 9),
+                        "fr",
+                    )
+                ],
+            ),
+            param(
+                text="il 5 maggio 2026",
+                expected=[("5 maggio 2026", datetime.datetime(2026, 5, 5), "it")],
+            ),
+            param(
+                text="след 12 мин 18 сек",
+                expected=[
+                    (
+                        "след 12 мин 18 сек",
+                        datetime.datetime(2026, 9, 23, 12, 12, 18),
+                        "bg",
+                    )
+                ],
+            ),
+        ]
+    )
+    def test_search_dates_language_detection_counts_only_whole_entries(
+        self, text: str, expected: list[tuple[str, datetime.datetime, str]]
+    ) -> None:
+        # Only the words of a multi-word dictionary entry that the splitter keeps
+        # whole count for language detection, not those of an unrecognised chunk
+        # such as " mai " (the "mai" of Vietnamese "ngày mai").
+        result = search_dates(
+            text,
+            settings={"RELATIVE_BASE": datetime.datetime(2026, 9, 23, 12)},
+            add_detected_language=True,
+        )
+        self.assertEqual(result, expected)
+
+    @parameterized.expand(
+        [
+            param(
+                text="He was born on 4 October 1957 and they married on 02/01/1958.",
+                expected=[
+                    ("on 4 October 1957 and", datetime.datetime(1957, 10, 4), "en"),
+                    ("on 02/01/1958", datetime.datetime(1958, 2, 1), "en"),
+                ],
+            ),
+            param(
+                text="The meeting is on 4 October 1957 and the follow-up on 02/01/1958.",
+                expected=[
+                    (
+                        "on 4 October 1957 and the",
+                        datetime.datetime(1957, 10, 4),
+                        "en",
+                    ),
+                    ("on 02/01/1958", datetime.datetime(1958, 2, 1), "en"),
+                ],
+            ),
+            param(
+                text="The report from 12 May 2018 mentions 08/09/2018 as the deadline.",
+                expected=[
+                    ("from 12 May 2018", datetime.datetime(2018, 5, 12), "en"),
+                    ("08/09/2018", datetime.datetime(2018, 8, 9), "en"),
+                ],
+            ),
+            param(
+                text="Published 3 February 2022 and revised 04/03/2022.",
+                expected=[
+                    ("3 February 2022 and", datetime.datetime(2022, 2, 3), "en"),
+                    ("04/03/2022", datetime.datetime(2022, 4, 3), "en"),
+                ],
+            ),
+        ]
+    )
+    def test_search_dates_numerals_do_not_decide_the_language(
+        self, text: str, expected: list[tuple[str, datetime.datetime, str]]
+    ) -> None:
+        # The numerals of a date are not words of any language. Counting the "01"
+        # and "02" of "02/01/1958" as Vietnamese words, because Vietnamese lists
+        # zero-padded months, made English text look Vietnamese.
+        result = search_dates(
+            text,
+            settings={"RELATIVE_BASE": datetime.datetime(2026, 9, 23, 12)},
+            add_detected_language=True,
+        )
+        self.assertEqual(result, expected)
+
+    @parameterized.expand(
+        [
+            param(
+                text="See you next Friday at 5pm.",
+                expected=[("next Friday at 5pm", datetime.datetime(2026, 9, 25, 17))],
+            ),
+            param(
+                text="Meet this Friday or last Tuesday",
+                expected=[
+                    ("this Friday", datetime.datetime(2026, 9, 25)),
+                    ("last Tuesday", datetime.datetime(2026, 9, 22)),
+                ],
+            ),
+            param(
+                text="Meet friday, last monday and next sunday",
+                expected=[
+                    ("friday", datetime.datetime(2026, 9, 18)),
+                    ("last monday", datetime.datetime(2026, 9, 21)),
+                    ("next sunday", datetime.datetime(2026, 9, 27)),
+                ],
+            ),
+            param(
+                text="Do it this Sunday, or (next Friday)",
+                expected=[
+                    ("this Sunday", datetime.datetime(2026, 9, 27)),
+                    ("next Friday", datetime.datetime(2026, 9, 25)),
+                ],
+            ),
+            param(text="The last three commits were fine", expected=None),
+            param(
+                text="The case was heard yesterday and last Friday.",
+                expected=[
+                    ("yesterday", datetime.datetime(2026, 9, 22, 12)),
+                    ("last Friday", datetime.datetime(2026, 9, 18)),
+                ],
+            ),
+            param(
+                text="I was there last Sunday at 5pm and last Friday at 5pm",
+                expected=[
+                    ("last Sunday at 5pm", datetime.datetime(2026, 9, 20, 17)),
+                    ("last Friday at 5pm", datetime.datetime(2026, 9, 18, 17)),
+                ],
+            ),
+            param(
+                text="Fireworks are next Friday, July 4, 2025.",
+                expected=[("next Friday, July 4, 2025", datetime.datetime(2025, 7, 4))],
+            ),
+            param(
+                text="next Friday the 19th at 5pm",
+                expected=[
+                    ("next Friday the 19th at 5pm", datetime.datetime(2026, 9, 19, 17))
+                ],
+            ),
+            param(
+                text="April 24 (next week)",
+                expected=[("April 24", datetime.datetime(2026, 4, 24))],
+            ),
+            param(
+                text="5th June to next week, the 19th",
+                expected=[
+                    ("5th June", datetime.datetime(2026, 6, 5)),
+                    ("the 19th", datetime.datetime(2026, 9, 19)),
+                ],
+            ),
+            param(
+                text='Posted "next week" / 19/06/2020',
+                expected=[("19/06/2020", datetime.datetime(2020, 6, 19))],
+            ),
+            param(
+                text="June 19 / today",
+                expected=[
+                    ("June 19", datetime.datetime(2026, 6, 19)),
+                    ("today", datetime.datetime(2026, 9, 23, 12)),
+                ],
+            ),
+            param(
+                text="last Tuesday Sept 6 and May 20",
+                expected=[
+                    ("last Tuesday Sept 6", datetime.datetime(2026, 9, 6)),
+                    ("May 20", datetime.datetime(2026, 5, 20)),
+                ],
+            ),
+            param(
+                text="last Tuesday Sept 6 / May 20",
+                expected=[
+                    ("last Tuesday Sept 6", datetime.datetime(2026, 9, 6)),
+                    ("May 20", datetime.datetime(2026, 5, 20)),
+                ],
+            ),
+            param(
+                text="June 5 and yesterday and last Tuesday",
+                expected=[
+                    ("June 5", datetime.datetime(2026, 6, 5)),
+                    ("yesterday", datetime.datetime(2026, 9, 22, 12)),
+                    ("last Tuesday", datetime.datetime(2026, 9, 22)),
+                ],
+            ),
+            param(
+                text="19/06/2020 [month]",
+                expected=[("19/06/2020", datetime.datetime(2020, 6, 19))],
+            ),
+            param(
+                text="last Friday at 5pm and (yesterday)",
+                expected=[
+                    ("last Friday at 5pm", datetime.datetime(2026, 9, 18, 17)),
+                    ("yesterday", datetime.datetime(2026, 9, 22, 12)),
+                ],
+            ),
+            param(
+                text="19/06/2020 and [tomorrow at 5pm]",
+                expected=[
+                    ("19/06/2020", datetime.datetime(2020, 6, 19)),
+                    ("tomorrow at 5pm", datetime.datetime(2026, 9, 24, 17)),
+                ],
+            ),
+            param(
+                text='20 June 2020 / "in 3 days"',
+                expected=[
+                    ("20 June 2020", datetime.datetime(2020, 6, 20)),
+                    ("in 3 days", datetime.datetime(2026, 9, 26, 12)),
+                ],
+            ),
+            param(text="Meet on the last friday of June", expected=None),
+            param(
+                text="Enjoy this sun",
+                expected=[("sun", datetime.datetime(2026, 9, 20))],
+            ),
+            param(
+                text="On this Saturday 20th / yesterday, nothing.",
+                expected=[
+                    ("this Saturday 20th", datetime.datetime(2026, 9, 20)),
+                    ("yesterday", datetime.datetime(2026, 9, 22, 12)),
+                ],
+            ),
+        ]
+    )
+    def test_search_dates_weekday_with_modifier(
+        self, text: str, expected: list[tuple[str, datetime.datetime]] | None
+    ) -> None:
+        result = search_dates(
+            text,
+            languages=["en"],
+            settings={"RELATIVE_BASE": datetime.datetime(2026, 9, 23, 12)},
+        )
+        self.assertEqual(result, expected)
+
+    @parameterized.expand(
+        [
+            param(
+                "en",
+                "May 5, 2020 (10:30 am)",
+                ("May 5, 2020 (10:30 am)", datetime.datetime(2020, 5, 5, 10, 30)),
+            ),
+            param(
+                "en",
+                "May 5, 2020 (5pm)",
+                ("May 5, 2020 (5pm)", datetime.datetime(2020, 5, 5, 17)),
+            ),
+            param(
+                "en",
+                "May 5, 2020 (at 5 pm)",
+                ("May 5, 2020 (at 5 pm)", datetime.datetime(2020, 5, 5, 17)),
+            ),
+            param(
+                "en",
+                "Thu (12 Feb 2016)",
+                ("Thu (12 Feb 2016)", datetime.datetime(2016, 2, 12)),
+            ),
+            param(
+                "hu",
+                "2020. december 21. (hétfő) 20:00",
+                (
+                    "2020. december 21. (hétfő) 20:00",
+                    datetime.datetime(2020, 12, 21, 20),
+                ),
+            ),
+            param(
+                "ru",
+                "9 ноября 2020 18:44 (UTC+04:00)",
+                (
+                    "9 ноября 2020 18:44 (UTC+04:00)",
+                    datetime.datetime(
+                        2020,
+                        11,
+                        9,
+                        18,
+                        44,
+                        tzinfo=datetime.timezone(datetime.timedelta(hours=4)),
+                    ),
+                ),
+            ),
+        ]
+    )
+    def test_search_dates_enclosed_part_of_date(
+        self, language: str, text: str, expected: tuple[str, datetime.datetime]
+    ) -> None:
+        self.assertEqual(search_dates(text, languages=[language]), [expected])
+
+    @parameterized.expand(
+        [
+            param(
+                text="Deadline: next Friday",
+                expected=[("next Friday", datetime.datetime(2026, 9, 25))],
+            ),
+            param(
+                text="See you next Friday at 5pm or last Monday",
+                expected=[
+                    ("next Friday at 5pm", datetime.datetime(2026, 9, 25, 17)),
+                    ("last Monday", datetime.datetime(2026, 9, 21)),
+                ],
+            ),
+            param(text="114 this week", expected=None),
+        ]
+    )
+    def test_search_dates_detects_language_of_multi_word_entries(
+        self, text: str, expected: list[tuple[str, datetime.datetime]] | None
+    ) -> None:
+        result = search_dates(
+            text, settings={"RELATIVE_BASE": datetime.datetime(2026, 9, 23, 12)}
+        )
+        self.assertEqual(result, expected)
+
+    @parameterized.expand(
+        [
+            param(
+                text="5 Jan 2020, last monday, next sunday",
+                expected=[
+                    ("5 Jan 2020", datetime.datetime(2020, 1, 5)),
+                    ("last monday", datetime.datetime(2026, 9, 21)),
+                    ("next sunday", datetime.datetime(2026, 9, 27)),
+                ],
+            ),
+            param(
+                text="next Tuesday or last Friday",
+                expected=[
+                    ("next Tuesday", datetime.datetime(2026, 9, 29)),
+                    ("last Friday", datetime.datetime(2026, 9, 18)),
+                ],
+            ),
+            param(
+                text="3 June 2020 (last Friday)",
+                expected=[
+                    ("3 June 2020", datetime.datetime(2020, 6, 3)),
+                    ("last Friday", datetime.datetime(2026, 9, 18)),
+                ],
+            ),
+            param(
+                text='3 June 2020, "next Friday"',
+                expected=[
+                    ("3 June 2020", datetime.datetime(2020, 6, 3)),
+                    ("next Friday", datetime.datetime(2026, 9, 25)),
+                ],
+            ),
+            param(
+                text="next Friday and Thursday",
+                expected=[
+                    ("next Friday", datetime.datetime(2026, 9, 25)),
+                    ("Thursday", datetime.datetime(2026, 9, 24)),
+                ],
+            ),
+        ]
+    )
+    def test_search_dates_weekday_with_modifier_relative_to_now(
+        self, text: str, expected: list[tuple[str, datetime.datetime]]
+    ) -> None:
+        with patch(
+            "dateparser.parser._now", return_value=datetime.datetime(2026, 9, 23, 12)
+        ):
+            result = search_dates(text, languages=["en"])
+        self.assertEqual(result, expected)
+
+    @parameterized.expand(
+        [
+            param(
+                text="06:22 thứ sáu ngày 19/03/2021",
+                language="vi",
+                expected=["06:22 thứ sáu ngày 19/03/2021"],
+            ),
+            param(
+                text="Minggu, 14 Feb 2021 20:31 WIB",
+                language="id",
+                expected=["Feb 2021", "20:31 WIB"],
+            ),
+        ]
+    )
+    def test_search_dates_other_languages_unaffected_by_weekday_modifiers(
+        self, text: str, language: str, expected: list[str]
+    ) -> None:
+        result = search_dates(text, languages=[language])
+        assert result is not None
+        self.assertEqual([found[0] for found in result], expected)
+
+    def test_search_dates_skipped_word_does_not_line_up_words(self) -> None:
+        result = search_dates(
+            "01 Oktober 2020, 14: 00: 59 WIB | editor : Mochamad Chariris",
+            languages=["id"],
+        )
+        self.assertEqual(result, [("01 Oktober 2020", datetime.datetime(2020, 10, 1))])
+
+    def test_search_dates_hour_after_at_is_time(self) -> None:
+        result = search_dates(
+            "see you at 22h tomorrow",
+            languages=["en"],
+            settings={"RELATIVE_BASE": datetime.datetime(2026, 9, 24, 12)},
+        )
+        self.assertEqual(
+            result, [("at 22h tomorrow", datetime.datetime(2026, 9, 25, 22))]
+        )
+
+    def test_search_dates_long_skipped_word_run(self) -> None:
+        start = process_time()
+        search_dates(", " * 800, languages=["zh"])
+        self.assertLess(process_time() - start, 1.0)
+
+    def test_search_dates_long_punctuation_run_between_dates(self) -> None:
+        start = process_time()
+        search_dates("2020年9月1日" + "，" * 8000 + "后天", languages=["zh"])
+        self.assertLess(process_time() - start, 1.0)
+
+    def test_search_dates_skipped_words_before_relative_expression(self) -> None:
+        result = search_dates("and " * 11 + "in 2 days 2020-09-01", languages=["en"])
+        assert result is not None
+        self.assertEqual(result[-1], ("2020-09-01", datetime.datetime(2020, 9, 1)))
+
+    def test_search_dates_long_skipped_word_run_next_to_numeric_date(self) -> None:
+        start = process_time()
+        search_dates("and " * 800 + "in 2 days 2020-09-01", languages=["en"])
+        self.assertLess(process_time() - start, 1.0)
+
+    def test_search_dates_skipped_word_changes_translation(self) -> None:
+        result = search_dates(
+            "Chaque jour de 9h30 à 18h",
+            languages=["fr"],
+            settings={"RELATIVE_BASE": datetime.datetime(2026, 9, 24, 12)},
+        )
+        self.assertEqual(
+            result,
+            [
+                ("9h30", datetime.datetime(2026, 9, 24, 9, 30)),
+                ("18h", datetime.datetime(2026, 9, 24, 18)),
+            ],
+        )
+
+    @parameterized.expand(
+        [
+            param(
+                text="June 5 and next week",
+                language="en",
+                expected=[
+                    ("June 5", datetime.datetime(2026, 6, 5)),
+                    ("next week", datetime.datetime(2026, 9, 30, 12)),
+                ],
+            ),
+            param(
+                text="June  5 and next week",
+                language="en",
+                expected=[
+                    ("June 5", datetime.datetime(2026, 6, 5)),
+                    ("next week", datetime.datetime(2026, 9, 30, 12)),
+                ],
+            ),
+            param(
+                text="June 5 and next week and tomorrow",
+                language="en",
+                expected=[
+                    ("June 5", datetime.datetime(2026, 6, 5)),
+                    ("next week and tomorrow", datetime.datetime(2026, 10, 1, 12)),
+                ],
+            ),
+            param(
+                text="June 5 and tomorrow at 5pm",
+                language="en",
+                expected=[
+                    ("June 5", datetime.datetime(2026, 6, 5)),
+                    ("tomorrow at 5pm", datetime.datetime(2026, 9, 24, 17)),
+                ],
+            ),
+            param(
+                text="5. Juni und nächste Woche",
+                language="de",
+                expected=[
+                    ("5. Juni", datetime.datetime(2026, 6, 5)),
+                    ("nächste Woche", datetime.datetime(2026, 9, 30, 12)),
+                ],
+            ),
+            param(
+                text="5 июня и завтра в 17:00",
+                language="ru",
+                expected=[
+                    ("5 июня", datetime.datetime(2026, 6, 5)),
+                    ("завтра в 17:00", datetime.datetime(2026, 9, 24, 17)),
+                ],
+            ),
+            param(
+                text="الأحد خلال 4 ساعات",
+                language="ar",
+                expected=[
+                    ("الأحد", datetime.datetime(2026, 9, 20)),
+                    ("خلال 4 ساعات", datetime.datetime(2026, 9, 23, 16)),
+                ],
+            ),
+            param(
+                text="05.06.2020, 17:30 Uhr",
+                language="de",
+                expected=[
+                    ("05.06.2020, 17:30 Uhr", datetime.datetime(2020, 5, 6, 17, 30))
+                ],
+            ),
+            param(
+                text="5 يونيو 2020 الساعة 5:00 مساءً",
+                language="ar",
+                expected=[
+                    ("5 يونيو 2020 الساعة 5:00 مساءً", datetime.datetime(2020, 6, 5, 17))
+                ],
+            ),
+        ]
+    )
+    def test_search_dates_skipped_words(
+        self, text: str, language: str, expected: list[tuple[str, datetime.datetime]]
+    ) -> None:
+        result = search_dates(
+            text,
+            languages=[language],
+            settings={"RELATIVE_BASE": datetime.datetime(2026, 9, 23, 12)},
+        )
+        self.assertEqual(result, expected)
+
+    def test_search_dates_relative_to_now_without_relative_base(self) -> None:
+        with patch(
+            "dateparser.parser._now", return_value=datetime.datetime(2026, 9, 23, 12)
+        ):
+            result = search_dates("Monday 10:00 and Wednesday 11:00", languages=["en"])
+        self.assertEqual(
+            result,
+            [
+                ("Monday 10:00", datetime.datetime(2026, 9, 21, 10)),
+                ("Wednesday 11:00", datetime.datetime(2026, 9, 16, 11)),
+            ],
+        )
+
+    @parameterized.expand(
+        [
+            param(
+                text="15 de outubro de 1936",
+                add_detected_language=True,
+                expected=[
+                    (
+                        "15 de outubro de 1936",
+                        datetime.datetime(1936, 10, 15, 0, 0),
+                        "pt",
+                    )
+                ],
+            ),
+            param(
+                text="15 de outubro de 1936",
+                add_detected_language=False,
+                expected=[
+                    ("15 de outubro de 1936", datetime.datetime(1936, 10, 15, 0, 0))
+                ],
+            ),
+        ]
+    )
+    def test_search_dates_returning_detected_languages_if_requested(
+        self,
+        text: str,
+        add_detected_language: bool,
+        expected: list[tuple[str, datetime.datetime]]
+        | list[tuple[str, datetime.datetime, str]],
+    ) -> None:
+        result = search_dates(text, add_detected_language=add_detected_language)
+        self.assertEqual(result, expected)
+
+    @parameterized.expand(
+        [
+            param(text, strategy, period)
+            for strategy in ("split", "ngram")
+            for text, period in (
+                ("on Monday", "day"),
+                ("on Monday at 00:00", "time"),
+                ("on Monday at night", "part_of_day"),
+                ("in 2 hours", "time"),
+                ("in October 2027", "month"),
+                ("in 2027", "year"),
+            )
+        ]
+    )
+    def test_search_dates_returning_period_if_requested(
+        self, text: str, strategy: str, period: str
+    ) -> None:
+        result = search_dates(
+            text,
+            languages=["en"],
+            settings={"RETURN_TIME_AS_PERIOD": True},
+            strategy=strategy,
+            add_period=True,
+        )
+        assert result is not None
+        self.assertEqual([date[2:] for date in result], [(period,)])
+
+    @parameterized.expand([param("split"), param("ngram")])
+    def test_search_dates_returning_period_of_each_date(self, strategy: str) -> None:
+        result = search_dates(
+            "Founded in 2019, renamed on 5 March 2020 and sold in June 2021.",
+            languages=["en"],
+            strategy=strategy,
+            add_period=True,
+        )
+        assert result is not None
+        self.assertEqual(
+            [date[2:] for date in result], [("year",), ("day",), ("month",)]
+        )
+
+    def test_search_dates_returning_period_before_detected_language(self) -> None:
+        result = search_dates(
+            "15 de outubro de 1936", add_period=True, add_detected_language=True
+        )
+        self.assertEqual(
+            result,
+            [
+                (
+                    "15 de outubro de 1936",
+                    datetime.datetime(1936, 10, 15, 0, 0),
+                    "day",
+                    "pt",
+                )
+            ],
+        )
+
+    def test_search_dates_returning_period_of_time_spans(self) -> None:
+        base = datetime.datetime(2025, 2, 15, 12, 0)
+        result = search_dates(
+            "messages received for the past month",
+            languages=["en"],
+            settings={"RETURN_TIME_SPAN": True, "RELATIVE_BASE": base},
+            add_period=True,
+        )
+        assert result is not None
+        self.assertEqual(
+            result[-2:],
+            [
+                ("for the past month (start)", base - timedelta(days=30), "day"),
+                ("for the past month (end)", base, "day"),
+            ],
+        )
+
+    @parameterized.expand(
+        [
+            param(text="19 марта 2001", languages="wrong type: str instead of list"),
+        ]
+    )
+    def test_date_search_function_invalid_languages_type(
+        self, text: str, languages: str
+    ) -> None:
+        self.run_search_dates_function_invalid_languages(
+            text=text, languages=languages, error_type=TypeError
+        )
+        self.check_error_message(
+            "languages argument must be a list (<class 'str'> given)"
+        )
+
+    @parameterized.expand(
+        [
+            param(text="19 марта 2001", languages=["unknown language code"]),
+        ]
+    )
+    def test_date_search_function_invalid_language_code(
+        self, text: str, languages: list[str]
+    ) -> None:
+        self.run_search_dates_function_invalid_languages(
+            text=text, languages=languages, error_type=ValueError
+        )
+        self.check_error_message("Unknown language(s): 'unknown language code'")
+
+    def test_search_dates_with_prepositions(self) -> None:
+        """Test `search_dates` for parsing Russian date ranges with prepositions and language detection."""
+        result = search_dates(
+            "Сервис будет недоступен с 12 января по 30 апреля.",
+            add_detected_language=True,
+            languages=["ru"],
+        )
+        expected = [
+            ("12 января", datetime.datetime(today.year, 1, 12, 0, 0), "ru"),
+            ("30 апреля", datetime.datetime(today.year, 4, 30, 0, 0), "ru"),
+        ]
+        assert result == expected
+
+    def test_search_dates_with_standalone_accent_mark_before_a_date(self) -> None:
+        """A standalone accent mark glued to a date should not swallow its text."""
+        result = search_dates(
+            "ABC´1997.",
+            languages=["en"],
+            settings={"RELATIVE_BASE": relative_base},
+        )
+        expected = [
+            (
+                "1997",
+                datetime.datetime(1997, relative_base.month, relative_base.day, 0, 0),
+            )
+        ]
+        assert result == expected
+
+    def test_search_dates_with_standalone_accent_mark_not_glued_to_a_date(
+        self,
+    ) -> None:
+        """An accent mark already next to a space is left untouched."""
+        result = search_dates(
+            "Jan´ 5, 2020",
+            languages=["en"],
+            settings={"RELATIVE_BASE": relative_base},
+        )
+        expected = [("Jan´ 5, 2020", datetime.datetime(2020, 1, 5, 0, 0))]
+        assert result == expected
+
+    @parameterized.expand(
+        [
+            param(
+                text="Ужасное событие произошло в тот день. Двадцатое февраля. Вспоминаю тот день с ужасом.",
+                expected_text="Двадцатое февраля",
+                expected_day=20,
+                expected_month=2,
+                description="20th February",
+            ),
+            param(
+                text="Ужасное событие произошло в тот день. Двадцать первое февраля. Вспоминаю тот день с ужасом.",
+                expected_text="Двадцать первое февраля",
+                expected_day=21,
+                expected_month=2,
+                description="21st February",
+            ),
+            param(
+                text="Ужасное событие произошло в тот день. Двадцать второе февраля. Вспоминаю тот день с ужасом.",
+                expected_text="Двадцать второе февраля",
+                expected_day=22,
+                expected_month=2,
+                description="22nd February",
+            ),
+            param(
+                text="Ужасное событие произошло в тот день. Двадцать третье февраля. Вспоминаю тот день с ужасом.",
+                expected_text="Двадцать третье февраля",
+                expected_day=23,
+                expected_month=2,
+                description="23rd February",
+            ),
+            param(
+                text="Ужасное событие произошло в тот день. Двадцать четвёртое февраля. Вспоминаю тот день с ужасом.",
+                expected_text="Двадцать четвёртое февраля",
+                expected_day=24,
+                expected_month=2,
+                description="24th February (with ё)",
+            ),
+            param(
+                text="Ужасное событие произошло в тот день. Двадцать четвертое февраля. Вспоминаю тот день с ужасом.",
+                expected_text="Двадцать четвертое февраля",
+                expected_day=24,
+                expected_month=2,
+                description="24th February (without ё)",
+            ),
+            param(
+                text="Ужасное событие произошло в тот день. Двадцать пятое марта. Вспоминаю тот день с ужасом.",
+                expected_text="Двадцать пятое марта",
+                expected_day=25,
+                expected_month=3,
+                description="25th March",
+            ),
+            param(
+                text="Ужасное событие произошло в тот день. Двадцать шестое марта. Вспоминаю тот день с ужасом.",
+                expected_text="Двадцать шестое марта",
+                expected_day=26,
+                expected_month=3,
+                description="26th March",
+            ),
+            param(
+                text="Ужасное событие произошло в тот день. Двадцать седьмое марта. Вспоминаю тот день с ужасом.",
+                expected_text="Двадцать седьмое марта",
+                expected_day=27,
+                expected_month=3,
+                description="27th March",
+            ),
+            param(
+                text="Ужасное событие произошло в тот день. Двадцать восьмое марта. Вспоминаю тот день с ужасом.",
+                expected_text="Двадцать восьмое марта",
+                expected_day=28,
+                expected_month=3,
+                description="28th March",
+            ),
+            param(
+                text="Ужасное событие произошло в тот день. Двадцать девятое марта. Вспоминаю тот день с ужасом.",
+                expected_text="Двадцать девятое марта",
+                expected_day=29,
+                expected_month=3,
+                description="29th March",
+            ),
+            param(
+                text="Ужасное событие произошло в тот день. Тридцатое марта. Вспоминаю тот день с ужасом.",
+                expected_text="Тридцатое марта",
+                expected_day=30,
+                expected_month=3,
+                description="30th March",
+            ),
+            param(
+                text="Ужасное событие произошло в тот день. Тридцать первое марта. Вспоминаю тот день с ужасом.",
+                expected_text="Тридцать первое марта",
+                expected_day=31,
+                expected_month=3,
+                description="31st March",
+            ),
+        ]
+    )
+    def test_search_dates_multi_word_expression(
+        self,
+        text: str,
+        expected_text: str,
+        expected_day: int,
+        expected_month: int,
+        description: str,
+    ) -> None:
+        """Test parsing of multi-word date expressions in Russian."""
+        result = search_dates(text, languages=["ru"])
+        expected = [
+            (
+                expected_text,
+                datetime.datetime(
+                    datetime.datetime.now().year, expected_month, expected_day, 0, 0
+                ),
+            )
+        ]
+        self.assertEqual(result, expected)
+
+    # A Tuesday, so that the start of the week is neither the base date itself
+    # nor the day before it under either DEFAULT_START_OF_WEEK value.
+    TIME_SPAN_BASE = datetime.datetime(2025, 2, 18, 12, 0)
+
+    @parameterized.expand(
+        [
+            param(
+                "for the past month",
+                start=datetime.datetime(2025, 1, 19, 12, 0),
+                end=datetime.datetime(2025, 2, 18, 12, 0),
+            ),
+            param(
+                "for the past month",
+                start=datetime.datetime(2025, 1, 21, 12, 0),
+                end=datetime.datetime(2025, 2, 18, 12, 0),
+                settings={"DEFAULT_DAYS_IN_MONTH": 28},
+            ),
+            param(
+                "last week",
+                start=datetime.datetime(2025, 2, 10, 12, 0),
+                end=datetime.datetime(2025, 2, 16, 12, 0),
+            ),
+            param(
+                "last week",
+                start=datetime.datetime(2025, 2, 9, 12, 0),
+                end=datetime.datetime(2025, 2, 15, 12, 0),
+                settings={"DEFAULT_START_OF_WEEK": "sunday"},
+            ),
+            param(
+                "in the past 5 days",
+                start=datetime.datetime(2025, 2, 13, 12, 0),
+                end=datetime.datetime(2025, 2, 18, 12, 0),
+            ),
+            param(
+                "previous 3 weeks",
+                start=datetime.datetime(2025, 1, 28, 12, 0),
+                end=datetime.datetime(2025, 2, 18, 12, 0),
+            ),
+            param(
+                "during the last 2 months",
+                start=datetime.datetime(2024, 12, 18, 12, 0),
+                end=datetime.datetime(2025, 2, 18, 12, 0),
+            ),
+            param(
+                "next month",
+                start=datetime.datetime(2025, 2, 18, 12, 0),
+                end=datetime.datetime(2025, 3, 20, 12, 0),
+            ),
+            param(
+                "coming week",
+                start=datetime.datetime(2025, 2, 24, 12, 0),
+                end=datetime.datetime(2025, 3, 2, 12, 0),
+            ),
+            param(
+                "coming week",
+                start=datetime.datetime(2025, 2, 23, 12, 0),
+                end=datetime.datetime(2025, 3, 1, 12, 0),
+                settings={"DEFAULT_START_OF_WEEK": "sunday"},
+            ),
+            param(
+                "in the next 10 days",
+                start=datetime.datetime(2025, 2, 18, 12, 0),
+                end=datetime.datetime(2025, 2, 28, 12, 0),
+            ),
+            param(
+                "following 2 weeks",
+                start=datetime.datetime(2025, 2, 18, 12, 0),
+                end=datetime.datetime(2025, 3, 4, 12, 0),
+            ),
+            param(
+                "next 6 months",
+                start=datetime.datetime(2025, 2, 18, 12, 0),
+                end=datetime.datetime(2025, 8, 18, 12, 0),
+            ),
+        ]
+    )
+    def test_search_dates_time_span(
+        self,
+        expression: str,
+        start: datetime.datetime,
+        end: datetime.datetime,
+        settings: dict[str, Any] | None = None,
+    ) -> None:
+        result = search_dates(
+            "messages received " + expression,
+            languages=["en"],
+            settings={
+                "RETURN_TIME_SPAN": True,
+                "RELATIVE_BASE": self.TIME_SPAN_BASE,
+                **(settings or {}),
+            },
+        )
+        assert result is not None
+        self.assertEqual(
+            [item for item in result if item[0].startswith(expression + " (")],
+            [(expression + " (start)", start), (expression + " (end)", end)],
+        )
+
+    def test_search_dates_time_span_without_a_span_expression(self) -> None:
+        result = search_dates(
+            "messages received yesterday",
+            languages=["en"],
+            settings={
+                "RETURN_TIME_SPAN": True,
+                "RELATIVE_BASE": self.TIME_SPAN_BASE,
+            },
+        )
+        self.assertEqual(result, [("yesterday", datetime.datetime(2025, 2, 17, 12, 0))])
+
+    def test_search_dates_time_span_disabled_by_default(self) -> None:
+        result = search_dates(
+            "messages received for the past month",
+            languages=["en"],
+            settings={"RELATIVE_BASE": self.TIME_SPAN_BASE},
+        )
+        self.assertIsNone(result)
+
+    def test_search_dates_keeps_an_explicit_date_order_after_the_first_date(
+        self,
+    ) -> None:
+        result = search_dates(
+            "op 30-05-2027. Deze op 01-11-2026",
+            languages=["nl"],
+            settings={"DATE_ORDER": "DMY", "STRICT_PARSING": True},
+        )
+        self.assertEqual(
+            result,
+            [
+                ("30-05-2027", datetime.datetime(2027, 5, 30, 0, 0)),
+                ("01-11-2026", datetime.datetime(2026, 11, 1, 0, 0)),
+            ],
+        )
+
+    @parameterized.expand(
+        [
+            # Every language but vi and hu is searched in its English
+            # translation, so the dates after the first one were read as MDY
+            param(
+                "nl",
+                "Besteld op 25-12-2020, verzonden op 02-01-2021 en geleverd op 05-01-2021.",
+                "DMY",
+                [
+                    ("25-12-2020", datetime.datetime(2020, 12, 25, 0, 0)),
+                    ("02-01-2021", datetime.datetime(2021, 1, 2, 0, 0)),
+                    ("05-01-2021", datetime.datetime(2021, 1, 5, 0, 0)),
+                ],
+            ),
+            param(
+                "de",
+                "Bestellt 25.12.2020, versandt 02.01.2021, geliefert 05.01.2021.",
+                "DMY",
+                [
+                    ("25.12.2020", datetime.datetime(2020, 12, 25, 0, 0)),
+                    ("02.01.2021", datetime.datetime(2021, 1, 2, 0, 0)),
+                    ("05.01.2021", datetime.datetime(2021, 1, 5, 0, 0)),
+                ],
+            ),
+            param(
+                "fr",
+                "Commandé 25/12/2020, expédié 02/01/2021, livré 05/01/2021.",
+                "DMY",
+                [
+                    ("25/12/2020", datetime.datetime(2020, 12, 25, 0, 0)),
+                    ("02/01/2021", datetime.datetime(2021, 1, 2, 0, 0)),
+                    ("05/01/2021", datetime.datetime(2021, 1, 5, 0, 0)),
+                ],
+            ),
+            param(
+                "ru",
+                "Заказ 25.12.2020, отправка 02.01.2021, доставка 05.01.2021.",
+                "DMY",
+                [
+                    ("25.12.2020", datetime.datetime(2020, 12, 25, 0, 0)),
+                    ("02.01.2021", datetime.datetime(2021, 1, 2, 0, 0)),
+                    ("05.01.2021", datetime.datetime(2021, 1, 5, 0, 0)),
+                ],
+            ),
+            param(
+                "en",
+                "Ordered 25/12/2020, shipped 02/01/2021, delivered 05/01/2021.",
+                "DMY",
+                [
+                    ("25/12/2020", datetime.datetime(2020, 12, 25, 0, 0)),
+                    ("02/01/2021", datetime.datetime(2021, 1, 2, 0, 0)),
+                    ("05/01/2021", datetime.datetime(2021, 1, 5, 0, 0)),
+                ],
+            ),
+            # vi and hu are searched in their own locale, whose order is DMY
+            # and YMD respectively
+            param(
+                "vi",
+                "Đặt hàng 12/25/2020, giao hàng 01/02/2021, nhận hàng 01/05/2021.",
+                "MDY",
+                [
+                    ("12/25/2020", datetime.datetime(2020, 12, 25, 0, 0)),
+                    ("01/02/2021", datetime.datetime(2021, 1, 2, 0, 0)),
+                    ("01/05/2021", datetime.datetime(2021, 1, 5, 0, 0)),
+                ],
+            ),
+            param(
+                "hu",
+                "Rendelés 12/25/2020, szállítás 01/02/2021, kézbesítés 01/05/2021.",
+                "MDY",
+                [
+                    ("12/25/2020", datetime.datetime(2020, 12, 25, 0, 0)),
+                    ("01/02/2021", datetime.datetime(2021, 1, 2, 0, 0)),
+                    ("01/05/2021", datetime.datetime(2021, 1, 5, 0, 0)),
+                ],
+            ),
+            param(
+                "en",
+                "Ordered 12/25/2020, shipped 01/02/2021, delivered 01/05/2021.",
+                "MDY",
+                [
+                    ("12/25/2020", datetime.datetime(2020, 12, 25, 0, 0)),
+                    ("01/02/2021", datetime.datetime(2021, 1, 2, 0, 0)),
+                    ("01/05/2021", datetime.datetime(2021, 1, 5, 0, 0)),
+                ],
+            ),
+            # With a four-digit year first, any order reads the year first, so
+            # only a two-digit year tells YMD apart
+            param(
+                "en",
+                "Ordered 20-12-25, shipped 21-01-02, delivered 21-01-05.",
+                "YMD",
+                [
+                    ("20-12-25", datetime.datetime(2020, 12, 25, 0, 0)),
+                    ("21-01-02", datetime.datetime(2021, 1, 2, 0, 0)),
+                    ("21-01-05", datetime.datetime(2021, 1, 5, 0, 0)),
+                ],
+            ),
+            param(
+                "es",
+                "Pedido 20/12/25, enviado 21/01/02, entregado 21/01/05.",
+                "YMD",
+                [
+                    ("20/12/25", datetime.datetime(2020, 12, 25, 0, 0)),
+                    ("21/01/02", datetime.datetime(2021, 1, 2, 0, 0)),
+                    ("21/01/05", datetime.datetime(2021, 1, 5, 0, 0)),
+                ],
+            ),
+            param(
+                "vi",
+                "Đặt hàng 20/12/25, giao hàng 21/01/02, nhận hàng 21/01/05.",
+                "YMD",
+                [
+                    ("20/12/25", datetime.datetime(2020, 12, 25, 0, 0)),
+                    ("21/01/02", datetime.datetime(2021, 1, 2, 0, 0)),
+                    ("21/01/05", datetime.datetime(2021, 1, 5, 0, 0)),
+                ],
+            ),
+        ]
+    )
+    def test_search_dates_reads_every_date_in_an_explicit_date_order(
+        self,
+        language: str,
+        text: str,
+        date_order: str,
+        expected: list[tuple[str, datetime.datetime]],
+    ) -> None:
+        for strict_parsing in (False, True):
+            with self.subTest(strict_parsing=strict_parsing):
+                result = search_dates(
+                    text,
+                    languages=[language],
+                    settings={
+                        "DATE_ORDER": date_order,
+                        "STRICT_PARSING": strict_parsing,
+                    },
+                )
+                self.assertEqual(result, expected)
+
+    @parameterized.expand(
+        [
+            param(
+                "en",
+                "Ordered 12/25/2020, shipped 01/02/2021, delivered 01/05/2021.",
+                [
+                    ("12/25/2020", datetime.datetime(2020, 12, 25, 0, 0)),
+                    ("01/02/2021", datetime.datetime(2021, 1, 2, 0, 0)),
+                    ("01/05/2021", datetime.datetime(2021, 1, 5, 0, 0)),
+                ],
+            ),
+            param(
+                "vi",
+                "Đặt hàng 25/12/2020, giao hàng 02/01/2021, nhận hàng 05/01/2021.",
+                [
+                    ("25/12/2020", datetime.datetime(2020, 12, 25, 0, 0)),
+                    ("02/01/2021", datetime.datetime(2021, 1, 2, 0, 0)),
+                    ("05/01/2021", datetime.datetime(2021, 1, 5, 0, 0)),
+                ],
+            ),
+            param(
+                "hu",
+                "Rendelés 20.12.25, szállítás 21.01.02, kézbesítés 21.01.05.",
+                [
+                    ("20.12.25", datetime.datetime(2020, 12, 25, 0, 0)),
+                    ("21.01.02", datetime.datetime(2021, 1, 2, 0, 0)),
+                    ("21.01.05", datetime.datetime(2021, 1, 5, 0, 0)),
+                ],
+            ),
+        ]
+    )
+    def test_search_dates_reads_every_date_in_the_locale_date_order_by_default(
+        self,
+        language: str,
+        text: str,
+        expected: list[tuple[str, datetime.datetime]],
+    ) -> None:
+        # Setting something else must not make the default DATE_ORDER count as
+        # one set by the caller for the dates after the first one.
+        for settings in (
+            None,
+            {"STRICT_PARSING": True},
+            {"PREFER_DAY_OF_MONTH": "first"},
+        ):
+            with self.subTest(settings=settings):
+                result = search_dates(text, languages=[language], settings=settings)
+                self.assertEqual(result, expected)
+
+    @parameterized.expand(
+        [
+            # The second date has no year, so it is the year of the first date
+            # or the next one, as PREFER_DATES_FROM prefers
+            param(
+                "en",
+                "Ordered 25/12/2020, delivered 02/01.",
+                {"PREFER_DATES_FROM": "future"},
+                [
+                    ("25/12/2020", datetime.datetime(2020, 12, 25, 0, 0)),
+                    ("02/01", datetime.datetime(2021, 1, 2, 0, 0)),
+                ],
+            ),
+            param(
+                "en",
+                "Ordered 25/12/2020, delivered 02/01.",
+                {"PREFER_DATES_FROM": "past"},
+                [
+                    ("25/12/2020", datetime.datetime(2020, 12, 25, 0, 0)),
+                    ("02/01", datetime.datetime(2020, 1, 2, 0, 0)),
+                ],
+            ),
+            # A relative date counts from the date found before it
+            param(
+                "en",
+                "Ordered 25/12/2020. Paid 02/01/2021. Shipped in 3 days. "
+                "Delivered 10/01/2021.",
+                {},
+                [
+                    ("25/12/2020", datetime.datetime(2020, 12, 25, 0, 0)),
+                    ("02/01/2021", datetime.datetime(2021, 1, 2, 0, 0)),
+                    ("in 3 days", datetime.datetime(2021, 1, 5, 0, 0)),
+                    ("10/01/2021", datetime.datetime(2021, 1, 10, 0, 0)),
+                ],
+            ),
+            param(
+                "ru",
+                "Заказ 25.12.2020. Оплата 02.01.2021. Через 3 дня отправка. "
+                "Доставка 10.01.2021.",
+                {},
+                [
+                    ("25.12.2020", datetime.datetime(2020, 12, 25, 0, 0)),
+                    ("02.01.2021", datetime.datetime(2021, 1, 2, 0, 0)),
+                    ("Через 3 дня", datetime.datetime(2021, 1, 5, 0, 0)),
+                    ("10.01.2021", datetime.datetime(2021, 1, 10, 0, 0)),
+                ],
+            ),
+            param(
+                "nl",
+                "op 30-05-2027 om 10:00. Deze op 01-11-2026 om 09:30",
+                {"TIMEZONE": "Europe/Amsterdam", "TO_TIMEZONE": "UTC"},
+                [
+                    ("30-05-2027 om 10:00", datetime.datetime(2027, 5, 30, 8, 0)),
+                    ("01-11-2026 om 09:30", datetime.datetime(2026, 11, 1, 8, 30)),
+                ],
+            ),
+            param(
+                "nl",
+                "op 30-05-2027 om 10:00. Deze op 01-11-2026 om 09:30",
+                {"TIMEZONE": "Europe/Amsterdam", "RETURN_AS_TIMEZONE_AWARE": True},
+                [
+                    (
+                        "30-05-2027 om 10:00",
+                        datetime.datetime(
+                            2027,
+                            5,
+                            30,
+                            10,
+                            0,
+                            tzinfo=datetime.timezone(timedelta(hours=2)),
+                        ),
+                    ),
+                    (
+                        "01-11-2026 om 09:30",
+                        datetime.datetime(
+                            2026,
+                            11,
+                            1,
+                            9,
+                            30,
+                            tzinfo=datetime.timezone(timedelta(hours=1)),
+                        ),
+                    ),
+                ],
+            ),
+        ]
+    )
+    def test_search_dates_keeps_the_other_settings_after_the_first_date(
+        self,
+        language: str,
+        text: str,
+        settings: dict[str, Any],
+        expected: list[tuple[str, datetime.datetime]],
+    ) -> None:
+        result = search_dates(
+            text, languages=[language], settings={"DATE_ORDER": "DMY", **settings}
+        )
+        self.assertEqual(result, expected)
+
+    @parameterized.expand(
+        [
+            # 25 cannot be the month, and "all" does not swap it with the day
+            param("all", "Opened 25/12/2020, closed 12/25/2021."),
+            # 32 cannot be the day, so it is the year, which DMY puts last
+            param("year", "Opened 25/12/2020, closed 32/12/10."),
+        ]
+    )
+    def test_search_dates_keeps_strict_date_order_after_the_first_date(
+        self, strict: str, text: str
+    ) -> None:
+        result = search_dates(
+            text,
+            languages=["en"],
+            settings={"DATE_ORDER": "DMY", "STRICT_DATE_ORDER": strict},
+        )
+        self.assertEqual(
+            result, [("25/12/2020", datetime.datetime(2020, 12, 25, 0, 0))]
+        )
+
+    @parameterized.expand(
+        [
+            param(
+                "On se voit demain à midi.",
+                [("demain à midi", datetime.datetime(2000, 1, 2, 12, 0))],
+            ),
+            param(
+                "Rendez-vous mardi à midi, ou lundi à 14:30.",
+                [
+                    ("mardi à midi", datetime.datetime(1999, 12, 28, 12, 0)),
+                    ("lundi à 14:30", datetime.datetime(1999, 12, 27, 14, 30)),
+                ],
+            ),
+            # The afternoon and before noon are not noon, whatever the hyphen
+            param(
+                "Réunion demain après-midi",
+                [("demain", datetime.datetime(2000, 1, 2, 0, 0))],
+            ),
+            param(
+                "Réunion demain après\u2013midi",
+                [("demain", datetime.datetime(2000, 1, 2, 0, 0))],
+            ),
+            param(
+                "Réunion demain après\u2011midi",
+                [("demain", datetime.datetime(2000, 1, 2, 0, 0))],
+            ),
+            param(
+                "Réunion demain après_midi",
+                [("demain", datetime.datetime(2000, 1, 2, 0, 0))],
+            ),
+            param("Réunion avant midi", None),
+            param("Réunion avant midi ou cet après-midi.", None),
+            # The text is accent-stripped before it is simplified, whatever
+            # NORMALIZE says
+            param(
+                "Réunion demain après-midi",
+                [("demain", datetime.datetime(2000, 1, 2, 0, 0))],
+                settings={"NORMALIZE": False},
+            ),
+            param("Livraison après midi", None, settings={"NORMALIZE": False}),
+            param(
+                "Réunion demain après le midi.",
+                [("demain", datetime.datetime(2000, 1, 2, 0, 0))],
+                settings={"NORMALIZE": False},
+            ),
+        ]
+    )
+    def test_search_dates_with_french_midi(
+        self,
+        text: str,
+        expected: list[tuple[str, datetime.datetime]] | None,
+        settings: dict[str, Any] | None = None,
+    ) -> None:
+        result = search_dates(
+            text,
+            languages=["fr"],
+            settings={
+                "RELATIVE_BASE": datetime.datetime(2000, 1, 1),
+                **(settings or {}),
+            },
+        )
+        self.assertEqual(result, expected)
+
+    def test_search_dates_with_chinese_am_before_the_hour(self) -> None:
+        result = search_dates("2021年5月5日 上午8点", languages=["zh"])
+        assert result
+        self.assertEqual(result[0], ("2021年5月5日", datetime.datetime(2021, 5, 5)))
+
+
+class TestNgramSearch(BaseTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.search_with_detection = DateSearchWithDetection()
+
+    @parameterized.expand(
+        [
+            # noise words ("on") are not part of the returned substring and
+            # trailing punctuation is stripped
+            param(
+                "en",
+                text="The first artificial Earth satellite was launched"
+                " on 4 October 1957.",
+                expected=[("4 October 1957", datetime.datetime(1957, 10, 4))],
+            ),
+            # all non-overlapping dates are returned, longest match first
+            param(
+                "en",
+                text="The client arrived to the office for the first time"
+                " in March 3rd, 2004 and got serviced, after a couple of months,"
+                " on May 6th 2004, the customer returned indicating a defect on"
+                " the part",
+                expected=[
+                    ("in March 3rd, 2004 and", datetime.datetime(2004, 3, 3)),
+                    ("May 6th 2004, the", datetime.datetime(2004, 5, 6)),
+                ],
+            ),
+            # bare small numbers are blacklisted and do not produce dates
+            param("en", text="Chapter 12, page 3", expected=[]),
+            # French
+            param(
+                "fr",
+                text="Publié le 11 juillet 2016",
+                expected=[("le 11 juillet 2016", datetime.datetime(2016, 7, 11))],
+            ),
+            param(
+                "fr",
+                text="Le premier satellite artificiel, lancé le 4 octobre 1957,"
+                " pesait 83 kg",
+                expected=[("le 4 octobre 1957", datetime.datetime(1957, 10, 4))],
+            ),
+            # Russian
+            param(
+                "ru",
+                text="веб-страница обновлена 11 июля 2016 года",
+                expected=[("11 июля 2016 года", datetime.datetime(2016, 7, 11))],
+            ),
+        ]
+    )
+    def test_ngram_search(
+        self, shortname: str, text: str, expected: list[tuple[str, datetime.datetime]]
+    ) -> None:
+        result = self.search_with_detection.search_dates(
+            text, languages=[shortname], strategy="ngram"
+        )
+        self.assertEqual(result["Language"], shortname)
+        self.assertEqual(result["Dates"], expected)
+
+    def test_ngram_search_with_relative_base(self) -> None:
+        result = self.search_with_detection.search_dates(
+            "posted 10 minutes ago",
+            languages=["en"],
+            settings={"RELATIVE_BASE": datetime.datetime(2020, 1, 1, 12, 0)},
+            strategy="ngram",
+        )
+        self.assertEqual(
+            result["Dates"],
+            [("10 minutes ago", datetime.datetime(2020, 1, 1, 11, 50))],
+        )
+
+    def test_ngram_search_returns_time_spans(self) -> None:
+        result = self.search_with_detection.search_dates(
+            "messages received for the past week",
+            languages=["en"],
+            settings={
+                "RETURN_TIME_SPAN": True,
+                "RELATIVE_BASE": datetime.datetime(2025, 2, 15, 12, 0),
+            },
+            strategy="ngram",
+        )
+        self.assertEqual(
+            result["Dates"],
+            [
+                ("for the past week (start)", datetime.datetime(2025, 2, 3, 12, 0)),
+                ("for the past week (end)", datetime.datetime(2025, 2, 9, 12, 0)),
+            ],
+        )
+
+    def test_search_dates_with_ngram_strategy(self) -> None:
+        result = search_dates(
+            "launched on 4 October 1957", languages=["en"], strategy="ngram"
+        )
+        self.assertEqual(result, [("4 October 1957", datetime.datetime(1957, 10, 4))])
+
+    def test_search_dates_with_ngram_strategy_and_detected_language(self) -> None:
+        result = search_dates(
+            "launched on 4 October 1957",
+            languages=["en"],
+            strategy="ngram",
+            add_detected_language=True,
+        )
+        self.assertEqual(
+            result, [("4 October 1957", datetime.datetime(1957, 10, 4), "en")]
+        )
+
+    def test_search_dates_ngram_strategy_returns_none_when_no_dates_found(self) -> None:
+        self.assertIsNone(
+            search_dates(
+                "Hello world nothing here at all", languages=["en"], strategy="ngram"
+            )
+        )
+
+    @parameterized.expand(
+        [
+            param(
+                "Ref 15032024 due 2 Apr 2024",
+                ["%d%m%Y"],
+                [
+                    ("15032024", datetime.datetime(2024, 3, 15)),
+                    ("2 Apr 2024", datetime.datetime(2024, 4, 2)),
+                ],
+            ),
+            param(
+                "A 15 March 2024 B",
+                ["%d %B %Y"],
+                [("15 March 2024", datetime.datetime(2024, 3, 15))],
+            ),
+            param(
+                "Posted 2024-03-15 14:30",
+                ["%Y-%m-%d"],
+                [("2024-03-15 14:30", datetime.datetime(2024, 3, 15, 14, 30))],
+            ),
+            param(
+                "x 2024-03-15 14:30 (12/03/2024 @ 10:00)",
+                iter(["%Y-%m-%d %H:%M", "%d/%m/%Y @ %H:%M"]),
+                [
+                    ("2024-03-15 14:30", datetime.datetime(2024, 3, 15, 14, 30)),
+                    ("12/03/2024 @ 10:00", datetime.datetime(2024, 3, 12, 10, 0)),
+                ],
+            ),
+            param(
+                "Posted 12/03/2024 10:00, updated 1 June 2024",
+                ["%d/%m/%Y", "%B %Y"],
+                [
+                    ("12/03/2024 10:00", datetime.datetime(2024, 3, 12, 10, 0)),
+                    ("1 June 2024", datetime.datetime(2024, 6, 1)),
+                ],
+            ),
+            param(
+                "Due 12/03/2024 10:00 +0200, 12/03 2024, 13/03/2024 tomorrow",
+                ["%d/%m/%Y %H:%M", "%d/%m/%Y", "%d/%m"],
+                [
+                    (
+                        "12/03/2024 10:00 +0200",
+                        datetime.datetime(
+                            2024,
+                            3,
+                            12,
+                            10,
+                            0,
+                            tzinfo=StaticTzInfo("UTC+02:00", timedelta(hours=2)),
+                        ),
+                    ),
+                    ("12/03", datetime.datetime(2026, 3, 12)),
+                    ("2024", datetime.datetime(2024, 1, 1)),
+                    ("13/03/2024", datetime.datetime(2024, 3, 13)),
+                    ("tomorrow", datetime.datetime(2026, 1, 2)),
+                ],
+            ),
+        ]
+    )
+    def test_search_dates_with_date_formats(
+        self,
+        text: str,
+        date_formats: Any,
+        expected: list[tuple[str, datetime.datetime]],
+    ) -> None:
+        result = search_dates(
+            text,
+            languages=["en"],
+            settings={"RELATIVE_BASE": datetime.datetime(2026, 1, 1)},
+            strategy="ngram",
+            date_formats=date_formats,
+        )
+        self.assertEqual(result, expected)
+
+    def test_parse_errors_are_logged_and_skipped(self) -> None:
+        get_date_data = DateDataParser.get_date_data
+
+        def fail_on_x(self: DateDataParser, date_string: str, *args: Any) -> Any:
+            if "x" in date_string:
+                raise RuntimeError
+            return get_date_data(self, date_string, *args)
+
+        with (
+            patch.object(DateDataParser, "get_date_data", fail_on_x),
+            self.assertLogs("dateparser.search.ngram_search", "WARNING") as logs,
+        ):
+            result = search_dates("x 2 Apr 2024", languages=["en"], strategy="ngram")
+        self.assertEqual(result, [("2 Apr 2024", datetime.datetime(2024, 4, 2))])
+        self.assertIn("Failed to parse 'x 2 Apr 2024'", logs.output[0])
+
+    def test_date_formats_with_period_and_language(self) -> None:
+        result = search_dates(
+            "Ref 15032024",
+            languages=["en"],
+            strategy="ngram",
+            date_formats=["%d%m%Y"],
+            add_period=True,
+            add_detected_language=True,
+        )
+        self.assertEqual(
+            result, [("15032024", datetime.datetime(2024, 3, 15), "day", "en")]
+        )
+
+    def test_date_formats_require_ngram_strategy(self) -> None:
+        with self.assertRaisesRegex(ValueError, "date_formats requires"):
+            search_dates("15032024", languages=["en"], date_formats=[])
+
+    def test_date_formats_string_raises_error(self) -> None:
+        with self.assertRaisesRegex(TypeError, "list of strings"):
+            search_dates(
+                "15032024", languages=["en"], strategy="ngram", date_formats="%d%m%Y"
+            )
+
+    def test_unknown_strategy_raises_error(self) -> None:
+        with self.assertRaisesRegex(ValueError, "strategy must be"):
+            search_dates("4 October 1957", languages=["en"], strategy="unknown")

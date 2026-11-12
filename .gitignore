@@ -1,0 +1,60 @@
+*.py[cod]
+.python-version
+
+# C extensions
+*.so
+
+# Packages
+*.egg
+*.eggs
+*.egg-info
+dist
+build
+eggs
+parts
+bin
+var
+sdist
+develop-eggs
+.installed.cfg
+lib
+lib64
+
+# Installer logs
+pip-log.txt
+
+# Unit test / coverage reports
+.coverage
+.tox
+nosetests.xml
+htmlcov
+coverage.xml
+
+# Translations
+*.mo
+
+# Mr Developer
+.mr.developer.cfg
+.project
+.pydevproject
+
+# Complexity
+output/*.html
+output/*/index.html
+
+# Sphinx
+docs/_build
+
+# Editors
+*.swp
+.idea
+.vscode/
+
+# CLDR
+/cldr-json/
+
+# CodSpeed
+.codspeed
+
+# Other
+raw_data
