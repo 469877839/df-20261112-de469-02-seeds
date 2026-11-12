@@ -1,0 +1,852 @@
+=============
+Release Notes
+=============
+
+v5.0
+----
+
+Breaking changes
+^^^^^^^^^^^^^^^^
+
+* **Admin change list template handling.**  This only affects you if you combine the admin mixins with another
+  library's admin mixin which also sets ``change_list_template`` (such as django-admin-sortable2), or if you have
+  applied a workaround for that situation, or if your project provides a per-app or per-model change list template
+  (``admin/<app>/change_list.html`` or ``admin/<app>/<model>/change_list.html``).  Otherwise, nothing changes.
+
+  The admin mixins no longer assign ``change_list_template`` when the ``ModelAdmin`` is instantiated.  Instead,
+  ``changelist_view()`` renders the import / export change list template
+  on each request, extending whichever template Django would otherwise have used.  This fixes interoperability with
+  third party mixins which declare ``change_list_template`` as a property (e.g. django-admin-sortable2).
+
+  As a result:
+
+  * ``init_change_list_template()`` and the ``ie_base_change_list_template`` instance attribute have been removed.
+    Remove any workaround which overrides or sets these.
+  * ``change_list_template`` on an admin instance now retains the value you (or another mixin) declared, rather
+    than being replaced by the import / export template.
+  * The ``'failed to assign change_list_template attribute'`` warning is no longer logged.
+  * When ``change_list_template`` is not set, the import / export template now extends Django's usual
+    per-model and per-app fallbacks (``admin/<app>/<model>/change_list.html``, ``admin/<app>/change_list.html``)
+    where they exist, instead of always ``admin/change_list.html``.
+  * If ``change_list_template`` points at one of this library's own templates (the pre-v5 workaround for
+    django-admin-sortable2), the change list now fails with ``TemplateDoesNotExist``.  Remove the declaration.
+
+  See `#2205 <https://github.com/django-import-export/django-import-export/issues/2205>`_.
+
+* Temporary storages (:class:`~import_export.tmp_storages.BaseStorage` and its subclasses) now deal in ``bytes``
+  only: ``save()`` receives the raw uploaded data and ``read()`` returns it unchanged.  The ``read_mode`` and
+  ``encoding`` constructor arguments have been removed.  If you have a custom storage class which relied on
+  these arguments, remove them and return ``bytes`` from ``read()``.
+
+  As a result, ``create_dataset()`` on a :class:`~import_export.formats.base_formats.Format` now always receives
+  ``bytes`` from the Admin import.  Previously it received ``str`` or ``bytes`` depending on the storage class
+  and on whether the import confirmation step was skipped.
+  :class:`~import_export.formats.base_formats.TextFormat` decodes the data using its ``encoding``, falling back
+  to ``utf-8`` when ``from_encoding`` is ``None`` (previously the system locale encoding was used in this case).
+  If you rely on ``from_encoding = None`` and import files which are not UTF-8 encoded, set ``from_encoding``
+  explicitly to the encoding of your files (for example ``"cp1252"``).
+  If you subclass ``TextFormat`` and override ``create_dataset()``, call ``super()`` so the data is decoded, and pass
+  any tablib options through as keyword arguments, for example::
+
+    class SemicolonCSV(CSV):
+        def create_dataset(self, in_stream, **kwargs):
+            return super().create_dataset(in_stream, delimiter=";", **kwargs)
+
+  Passing ``read_mode`` or ``encoding`` to a storage class (for example via
+  :meth:`~import_export.admin.ImportMixin.get_tmp_storage_class_kwargs`) now raises ``TypeError``.
+
+  The ``input_format`` parameter has been removed from
+  :meth:`~import_export.admin.ImportMixin.write_to_tmp_storage`, as the storage no longer depends on the
+  format.  Update any override to the new signature ``write_to_tmp_storage(self, import_file)``.
+  A new :meth:`~import_export.admin.ImportMixin.read_import_file` method returns the raw ``bytes`` of an
+  uploaded file and is used by both the confirm and skip-confirm import flows.
+
+  Additionally, if you have custom code which overrides storage handling in ``admin.py``, then review the PR to
+  check whether your implementation might be affected.
+
+  See `issue 2006 <https://github.com/django-import-export/django-import-export/issues/2006>`_ and
+  `PR 2197 <https://github.com/django-import-export/django-import-export/pull/2197>`_.
+
+* This release fixes an issue with form field name clashes (see `2108
+  <https://github.com/django-import-export/django-import-export/pull/2108>`_).
+
+  If you have any customizations which rely on form field names then you may need to make some adjustments as
+  a result of this change.
+
+  The ``resource``, ``format`` and ``export_items`` field names are now prepended with ``django-import-export-``.
+
+* Fixed issue where export forms were incorrectly showing import fields instead of export fields.
+  This was resolved by introducing context-specific methods for field retrieval.
+  See :ref:`deprecations <deprecations_v5>` and `PR 2118 <https://github.com/django-import-export/django-import-export/pull/2118>`_.
+
+* `PR 2145 <https://github.com/django-import-export/django-import-export/issues/2145>`_ enhanced the fields included in bulk updates.
+  Read-only fields and related fields (those with ``__`` in the attribute) are excluded from bulk update.
+  This PR also fixed an issue where field name is used instead of attribute name, which is incorrect.
+  If you have enabled ``use_bulk`` for imports then please test and ensure rows are still updated as expected.
+
+* :class:`~import_export.widgets.JSONWidget` previously used truthy checks on values in both ``clean()`` and
+  ``render()``, which meant that valid falsy JSON values such as ``0``, ``False``, ``[]`` and ``{}`` were silently
+  treated as ``None``.  This has been fixed so that these values are now correctly parsed and rendered.
+  If you have any import or export logic which depends on the previous (incorrect) behaviour of returning ``None``
+  for these values, you may need to update it.
+  See `PR 2143 <https://github.com/django-import-export/django-import-export/pull/2143>`_ and
+  `issue 2153 <https://github.com/django-import-export/django-import-export/issues/2153>`_.
+
+* The ``DEFAULT_FORMATS`` and ``BINARY_FORMATS`` module-level constants in ``import_export.formats.base_formats``
+  have been replaced with ``get_default_formats()`` and ``get_binary_formats()`` functions
+  (`#2149 <https://github.com/django-import-export/django-import-export/issues/2149>`_).
+
+  This avoids expensive third-party library imports (openpyxl, xlrd, etc.) at Django startup when formats are
+  disabled via the ``IMPORT_EXPORT_FORMATS`` setting.
+
+  **Migration**: replace::
+
+    from import_export.formats.base_formats import DEFAULT_FORMATS
+
+  with::
+
+    from import_export.formats.base_formats import get_default_formats
+    formats = get_default_formats()
+
+* ``CachedInstanceLoader`` now raises ``MultipleObjectsReturned`` when the configured import id matches more than
+  one existing object, matching ``ModelInstanceLoader`` instead of silently returning one of the matches.
+  Ensure that custom ``import_id_fields`` values uniquely identify one row.
+  See `PR 2169 <https://github.com/django-import-export/django-import-export/pull/2169>`_.
+
+* The pk sequence reset in :meth:`~import_export.resources.ModelResource.after_import` now only runs when the
+  imported data supplied explicit pk values for created rows, because resetting an already-correct sequence is
+  unsafe under concurrent imports of the same model
+  (see `issue 2166 <https://github.com/django-import-export/django-import-export/issues/2166>`_).
+  Fixture-style imports which supply pks are unaffected.
+
+  If a sequence was left behind by something other than the import (e.g. an earlier fixture load), imports will no
+  longer incidentally repair it — use Django's ``sqlsequencereset`` management command to fix it directly.
+  Note that the tracking of supplied pks happens in :meth:`~import_export.resources.Resource.save_instance`, so
+  custom overrides which do not call ``super()`` will always skip the reset.
+
+* ``ODS`` is now correctly classified as a binary format, extending ``TablibFormat`` instead of ``TextFormat``.  ``is_binary()`` now returns ``True`` and files are read in binary mode, fixing a ``UnicodeDecodeError`` on import of ``.ods`` files.  If you have a custom workaround for this (e.g. an ``ODS`` subclass forcing binary reads), it can be removed.  Any code which relied on ``ODS`` being a text format should be updated.  See `PR 2176 <https://github.com/django-import-export/django-import-export/pull/2176>`_.
+
+* The comparison used by :meth:`~import_export.resources.Resource.skip_row` when
+  :attr:`~import_export.options.ResourceOptions.skip_unchanged` is enabled is now delegated to each field's widget
+  via a new :meth:`~import_export.widgets.Widget.is_equal` hook (`PR 2174
+  <https://github.com/django-import-export/django-import-export/pull/2174>`_).
+
+  ``skip_row()`` calls ``is_equal()`` on every import field's widget.  The import preview diff also calls it
+  (for every import, regardless of ``skip_unchanged``) so that values which are equal but render differently, such as
+  ``Decimal("1803.60")`` persisted and ``Decimal("1803.6")`` imported from a spreadsheet, are not shown as a change
+  (`issue 1425 <https://github.com/django-import-export/django-import-export/issues/1425>`_).  Custom widgets which
+  subclass :class:`~import_export.widgets.Widget` inherit a plain equality check; a custom widget which does not
+  subclass ``Widget`` must now implement ``is_equal()``.  An ``is_equal()`` which raises during the preview diff is
+  logged and the rendered values are compared instead, so the row is not reported as an error.
+
+  ``Diff.__init__()`` now accepts an optional ``row`` keyword argument, which is passed to ``is_equal()``.  If you
+  return a custom ``Diff`` subclass from :meth:`~import_export.resources.Resource.get_diff_class`, update its
+  ``__init__()`` signature to accept ``row=None``.
+
+  :class:`~import_export.widgets.DateTimeWidget`, :class:`~import_export.widgets.TimeWidget` and
+  :class:`~import_export.widgets.DateWidget` now treat an imported value as unchanged if it matches either the
+  persisted value or what that value becomes after an export / import round-trip through the widget's format, so that
+  re-importing previously exported data is correctly skipped
+  (see `issue 2018 <https://github.com/django-import-export/django-import-export/issues/2018>`_).
+  A ``rounding_tolerance`` of one millisecond absorbs spreadsheet rounding; differences of one millisecond or more
+  which the widget's format or a native export preserves continue to be detected as changes.
+  Additionally, :class:`~import_export.widgets.DateWidget` now converts ``datetime`` instances (such as those
+  returned by openpyxl for date cells) to ``date`` instances in the project's default timezone.
+  :class:`~import_export.widgets.DateTimeWidget` and :class:`~import_export.widgets.TimeWidget` similarly coerce
+  ``date`` and ``datetime`` inputs respectively
+  (see `issue 2195 <https://github.com/django-import-export/django-import-export/issues/2195>`_).
+
+  :class:`~import_export.widgets.ManyToManyWidget` now implements the related-object comparison which was previously
+  inline in ``skip_row()``.  Behaviour is unchanged, but if you have overridden ``skip_row()`` you may be able to
+  simplify it by calling ``field.widget.is_equal()`` instead.
+
+Removed deprecations
+""""""""""""""""""""
+
+The following items, deprecated since v4.0, have been removed:
+
+* The ``get_valid_export_item_pks()`` method has been removed.
+  Use the ModelAdmin's ``get_queryset()`` or
+  :meth:`~import_export.admin.ExportMixin.get_export_queryset` instead.
+  See `PR 1890 <https://github.com/django-import-export/django-import-export/issues/1890>`_.
+
+* The ``Resource.import_obj()`` method has been removed.
+  Use :meth:`~import_export.resources.Resource.import_instance` instead.
+
+* The ``Resource.after_import_instance()`` method has been removed.
+  Use :meth:`~import_export.resources.Resource.after_init_instance` instead.
+
+* The ``Resource.get_fields()`` method (deprecated since v4.1) has been removed.
+  This method is no longer called internally.
+
+* The ``obj`` parameter of :meth:`~import_export.widgets.Widget.render` has been removed.
+  The ``render()`` method signature is now ``render(self, value, **kwargs)``.
+
+* The ``resource_class`` attribute on admin mixins has been removed.
+  Use ``resource_classes`` (a list) instead.
+
+* The ``get_resource_class()`` method on admin mixins has been removed.
+  Use ``get_resource_classes()`` instead.
+
+* The ``get_import_resource_class()`` method has been removed.
+  Use ``get_import_resource_classes()`` instead.
+
+* The ``get_export_resource_class()`` method has been removed.
+  Use ``get_export_resource_classes()`` instead.
+
+* The ``ExportViewMixin`` and ``ExportViewFormMixin`` classes have been removed.
+
+.. _deprecations_v5:
+
+Deprecations
+^^^^^^^^^^^^
+
+* The :meth:`~import_export.resources.Resource.get_user_visible_fields` method is deprecated and will be removed in version 6.0.
+  Use :meth:`~import_export.resources.Resource.get_user_visible_import_fields` for import contexts and
+  :meth:`~import_export.resources.Resource.get_user_visible_export_fields` for export contexts instead.
+  This change ensures that import and export operations show their respective field sets correctly in admin forms.
+
+v4.4.4
+------
+
+.. _release_notes_export_admin_action:
+
+* The label of the "export selected" admin action is now read from
+  :meth:`~import_export.admin.ExportActionMixin.export_admin_action` itself, via Django's ``admin.action``
+  decorator, instead of being set in :meth:`~import_export.admin.ExportActionMixin.get_actions`.  This was
+  required to support Django 6.1, which deprecates overriding ``get_actions()`` without the new
+  ``action_location`` parameter and, with the old signature, disables all change form actions on the admin.
+
+  If you override ``export_admin_action()`` in your ``ModelAdmin``, the override must now carry its own
+  description, otherwise the action appears in the admin as "Export admin action" instead of
+  "Export selected <objects>".  Decorate the override::
+
+    from django.contrib import admin
+    from django.utils.translation import gettext_lazy as _
+
+    class BookAdmin(ExportActionModelAdmin):
+        @admin.action(description=_("Export selected %(verbose_name_plural)s"))
+        def export_admin_action(self, request, queryset):
+            ...
+
+  A custom description set this way is now honoured, whereas previously it was ignored.
+
+  Overriding ``get_actions()`` is unaffected.  An override which declares the Django 6.1 ``action_location``
+  parameter can now pass it through to ``super()``.
+
+v4.4.3
+------
+
+.. _release_notes_integer_widget_dos:
+
+* This release patches a denial-of-service vulnerability in :class:`~import_export.widgets.IntegerWidget`.
+
+  ``IntegerWidget.clean()`` converted imported values using ``int(Decimal(value))`` with no bound on the
+  value's magnitude.  A value written in exponent notation, such as ``1e1000000``, is cheap to parse as a
+  ``Decimal`` but forces Python to expand every digit when converted to ``int``, a cost that grows
+  superlinearly with the digit count.  A single such value could stall the importing process for several
+  seconds while pinning a CPU core, and a file containing many such rows multiplied the cost.
+
+  ``IntegerWidget`` is the default widget for all integer model fields, including the ``id`` column used by
+  every resource that does not override ``import_id_fields``, so almost every import was affected.  The stall
+  occurred during the initial dry run, before the confirmation step.  Python's
+  ``sys.set_int_max_str_digits()`` limit did not protect this path, as it only guards conversions between
+  ``int`` and ``str``, not ``Decimal.__int__``.
+
+  This was an availability issue only.  The resulting integers exceed the range of any standard database
+  integer column, so no data could be written or corrupted through this path.
+
+  The fix rejects values whose magnitude exceeds ``sys.get_int_max_str_digits()`` digits (4300 by default)
+  before the conversion is attempted.  Such values are now reported as row errors.  Values within the limit,
+  including those in exponent notation such as ``1e5``, are unaffected, and no value a standard integer column
+  could store is rejected.  All users are advised to upgrade.
+
+  If you import integers larger than the default limit into a field that can store them, raise the limit with
+  ``sys.set_int_max_str_digits()``; the widget honours the configured value.
+
+  If you subclass :class:`~import_export.widgets.IntegerWidget` and override ``clean()``, you receive this fix
+  automatically only if your override delegates to ``super().clean()``.  An override that reimplements the
+  ``int(Decimal(...))`` conversion itself is not protected, and should apply the same magnitude check before
+  converting.
+
+  If you cannot upgrade, either of the following prevents the stall:
+
+  - Set :ref:`IMPORT_EXPORT_IMPORT_PERMISSION_CODE` to restrict import access to trusted users.
+  - Subclass :class:`~import_export.widgets.IntegerWidget`, override ``clean()`` to reject values whose
+    magnitude exceeds a sensible bound before calling ``super().clean()``, and assign the subclass to the
+    integer fields on your resources.  This suits deployments where all staff legitimately need import
+    permission.
+
+v4.4.2
+------
+
+.. _release_notes_force_insert_on_create:
+
+* This release patches a potential data corruption issue that can occur in certain configurations.
+
+  Installations are potentially affected if the following are true:
+
+  1. The instance loader does not find the existing row, either because the queryset has been filtered or because
+     ``import_id_fields`` identifies rows by a field other than the primary key.
+  2. The import file supplies the primary key of an existing row.
+
+  The fix is that instances classified as new during import are now saved with ``force_insert=True``.
+
+  Previously,  if an import file supplied a primary key which already existed in the database but which was not found
+  by the instance loader, the new instance was saved with that primary key and Django updated the existing row.
+  Fields omitted from the import were reset to their defaults, the preview reported the row as new, and the admin log
+  recorded an addition, so the overwrite left no visible trace.  This occurred when:
+
+  - :meth:`~import_export.resources.Resource.get_queryset` was overridden to restrict the rows a user may update (for
+    example per-tenant or per-user filtering).  A user with import permission could overwrite records outside their
+    scope by supplying the record's primary key.
+  - the model's default manager filters rows (for example a soft-delete manager), since the default
+    ``get_queryset()`` returns ``model.objects.all()``.  Importing the primary key of a soft-deleted record overwrote
+    it and reset the deleted flag.
+  - ``import_id_fields`` identified rows by a field other than the primary key, but the file also contained the
+    primary key column.  A row whose identifier matched no existing instance was classified as new, and if its primary
+    key value belonged to an existing row, that row was overwritten.
+
+  Such rows are now reported as errors (``IntegrityError``) and the existing row is left unchanged.  All users are
+  advised to upgrade.
+
+  If you relied on this behaviour to update rows by primary key, include the primary key in ``import_id_fields`` so
+  that the existing instance is loaded and updated explicitly.
+
+  If you have overridden :meth:`~import_export.resources.Resource.do_instance_save`, review it to ensure that
+  ``is_create`` is honoured.
+
+  If any of your models override ``save()``, the override must accept ``*args`` and ``**kwargs`` and pass them to
+  ``super().save()``, as required by Django.  An override declared as ``def save(self)`` will now fail with a
+  ``TypeError`` when a new instance is imported, because ``force_insert`` is passed as a keyword argument.
+
+  If you have understood the implications and need to restore the previous behaviour, override
+  :meth:`~import_export.resources.Resource.do_instance_save` to call ``instance.save()`` without ``force_insert``.
+  Note that this reinstates the overwrite described above for your resource.
+
+  If you cannot upgrade, either of the following prevents the overwrite:
+
+  - Stop the primary key being written from the import file.  Either omit it from the resource using the
+    :attr:`~import_export.options.ResourceOptions.fields` or :attr:`~import_export.options.ResourceOptions.exclude`
+    options (see :ref:`declare_fields`), or :ref:`declare it explicitly<field_declaration>` with ``readonly=True``.
+    This is not possible if the primary key is one of your ``import_id_fields``.
+  - Set :attr:`~import_export.options.ResourceOptions.clean_model_instances` to ``True`` so the collision is reported
+    as a validation error before the row is saved.
+
+v4.2
+----
+
+* When exporting via :ref:`admin action<export_via_admin_action>`, the queryset is now filtered on
+  ``get_queryset()`` instead of the Model's default queryset.
+  This should have no impact on existing implementations.
+
+  This change also made ``get_valid_export_item_pks()`` obsolete, as the
+  ModelAdmin's :meth:`~import_export.admin.ExportMixin.get_export_queryset`, or
+  ModelAdmin's ``get_queryset()`` can be used instead.
+  The ``get_valid_export_item_pks()`` method is now deprecated.
+
+  See `PR 1890 <https://github.com/django-import-export/django-import-export/issues/1890>`_.
+
+* Removed internal method ``_get_enabled_export_fields()`` in favour of passing the selected fields list as a
+  new parameter to :meth:`~import_export.resources.Resource.export_resource` and
+  :meth:`~import_export.resources.Resource.get_export_headers`.
+
+* Hide the "Resource" form when it only has one option, to avoid potentially confusing text in the interface like
+  "Resource: BookResource". To undo this change, use a form subclass that changes the field’s widget to a
+  ``django.forms.Select``.  See `1908 <https://github.com/django-import-export/django-import-export/issues/1908>`_
+
+*  `tablib <https://github.com/jazzband/tablib>`_ has been upgraded from v3.5.0 to 3.6.1.
+   This upgrade removes tablib's dependency on `MarkupPy <https://github.com/jazzband/tablib/pull/554>`_ in favour
+   of ``ElementTree``.  If you export to HTML, then this change may affect your output format, particularly if you have
+   already escaped HTML characters in the text.
+
+   See `issue 1627 <https://github.com/django-import-export/django-import-export/issues/1627>`_.
+
+Breaking changes
+^^^^^^^^^^^^^^^^
+
+* This release fixes a regression introduced in v4. From v4.2, numeric, boolean and date/time widgets are written as
+  native values to spreadsheet formats (ODS, XLS, XLSX).  This was the default behavior in v3.
+  See :ref:`documentation<modify_render_return_type>`.
+
+  This means that the ``coerce_to_string`` value which is passed to :class:`~import_export.widgets.Widget` is now
+  ignored if you are exporting to a spreadsheet format from the Admin interface.
+
+  If you have subclassed ``Widget``, ``Field`` or ``Resource``, then you may need to adjust your code to include
+  the ``**kwargs`` param as follows:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Previous
+     - New
+
+   * - ``Widget.render(self, value, obj=None)``
+     - ``Widget.render(self, value, obj=None, **kwargs)``
+
+   * - ``Field.export(self, instance)``
+     - ``Field.export(self, instance, **kwargs)``
+
+   * - ``Resource.export_field(self, field, instance)``
+     - ``Resource.export_field(self, field, instance, **kwargs)``
+
+   * - ``Resource.export_resource(self, instance, selected_fields=None)``
+     - ``Resource.export_resource(self, instance, selected_fields=None, **kwargs)``
+
+v4.1
+----
+
+The ``Resource.get_fields()`` method is no longer called within the package and has been deprecated.
+If you have overridden this method then it should be removed.
+
+v4.0
+----
+
+v4 introduces significant updates to import-export.  We have taken the opportunity to introduce
+breaking changes in order to fix some long-standing issues.
+
+Refer to the :doc:`changelog<changelog>` for more information. Please ensure you test
+thoroughly before deploying v4 to production.
+
+This guide describes the major changes and how to upgrade.
+
+Installation
+^^^^^^^^^^^^
+
+We have modified installation methods to allow for optional dependencies.
+This means that you have to explicitly declare dependencies when installing import-export.
+
+If you are not sure, or want to preserve the pre-v4 behaviour, then ensure that
+import-export is installed as follows (either in your requirements file or during
+installation)::
+
+  django-import-export[all]
+
+Functional changes
+^^^^^^^^^^^^^^^^^^
+
+CharWidget
+""""""""""
+
+Constructor arguments are dynamically set during instantiation based on the properties of the underlying Django
+db CharField.  If the db field has `blank <https://docs.djangoproject.com/en/stable/ref/models/fields/#blank>`_
+set to True, then incoming values of empty strings or null are stored as empty strings.
+See :class:`~import_export.widgets.CharWidget`.
+
+:meth:`~import_export.widgets.CharWidget.clean` will now return a string type as the default.
+The ``coerce_to_string`` option introduced in v3 is no longer used in this method.
+
+Validation error messages
+"""""""""""""""""""""""""
+
+The following widgets have had validation error messages updated:
+
+* :class:`~import_export.widgets.DateWidget`
+* :class:`~import_export.widgets.TimeWidget`
+* :class:`~import_export.widgets.DateTimeWidget`
+* :class:`~import_export.widgets.DurationWidget`
+
+Export format
+"""""""""""""
+
+We have standardized the export output which is returned from
+:meth:`~import_export.widgets.Widget.render`.
+
+Prior to v4, the export format returned from ``render()`` varied between Widget implementations.
+In v4, return values are rendered as strings by default (where applicable), with
+``None`` values returned as empty strings.  Widget params can modify this behavior.
+
+This causes a change when exporting to Excel.  In v3, certain fields, such as numeric values, were rendered as their
+native type.  In v4, all fields are now rendered as strings.  To preserve the v3 behavior when exporting to Excel,
+set the ``coerce_to_string`` param to ``False``.  See :ref:`documentation<modify_render_return_type>`.
+
+:doc:`Widget API documentation<api_widgets>`.
+
+Export field order
+""""""""""""""""""
+
+The ordering rules for exported fields has been standardized. See :ref:`documentation<field_ordering>`.
+
+Error output
+""""""""""""
+
+If the ``raise_errors`` parameter of :meth:`~import_export.resources.Resource.import_data` is ``True``, then an instance
+of :class:`~import_export.exceptions.ImportError` is raised.  This exception wraps the underlying exception.
+
+See `this PR <https://github.com/django-import-export/django-import-export/issues/1729>`_.
+
+Check ``import_id_fields``
+""""""""""""""""""""""""""
+
+Prior to v4 we had numerous issues where users were confused when imports failed due to declared ``import_id_fields``
+not being present in the dataset.  We added functionality in v4 to check for this and to raise a clearer error message.
+
+In some use-cases, it is a requirement that ``import_id_fields`` are not in the dataset, and are generated dynamically.
+If this affects your implementation, start with the documentation :ref:`here<import_id_fields_error_on_import>`.
+
+Deprecations
+^^^^^^^^^^^^
+
+* The ``obj`` param passed to :meth:`~import_export.widgets.Widget.render` is deprecated.
+  The :meth:`~import_export.widgets.Widget.render` method should not need to have a reference to
+  model instance.
+  The call to :meth:`~import_export.widgets.Widget.render` from :meth:`~import_export.fields.Field.export` has been removed.
+
+* Use of ``ExportViewFormMixin`` is deprecated.  See `this issue <https://github.com/django-import-export/django-import-export/issues/1666>`_.
+
+* See :ref:`renamed_methods`.
+
+* In the Admin UI, the declaration of ``resource_class`` is replaced by ``resource_classes``::
+
+      class BookAdmin(ImportExportModelAdmin):
+        # remove this line
+        # resource_class = BookResource
+        # replace with this
+        resource_classes = [BookResource]
+
+Admin UI
+^^^^^^^^
+
+LogEntry
+""""""""
+
+``LogEntry`` instances are created during import for creates, updates and deletes.
+The functionality to store ``LogEntry`` has changed in v4 in order to address a deprecation in Django 5.
+For this to work correctly, deleted instances are now always copied and retained in each
+:class:`~import_export.results.RowResult` so that they can be recorded in each ``LogEntry``.
+
+This only occurs for delete operations initiated from the Admin UI.
+
+Export action
+"""""""""""""
+
+The export action has been updated to include the export workflow.  Prior to v4, it was possible to select export
+selected items using an export admin action.  However this meant that the export workflow was skipped and it was not
+possible to select the export resource.  This has been fixed in v4 so that export workflow is now present when
+exporting via the Admin UI action.  For more information see :ref:`export documentation<export_via_admin_action>`.
+
+Export selected fields
+""""""""""""""""""""""
+
+The :ref:`export 'confirm' page<export_confirm>` now includes selectable fields for export.
+If you wish to revert to the previous (v3) version of the export confirm screen, add a
+:attr:`~import_export.admin.ExportMixin.export_form_class` declaration to your Admin class subclass, for example::
+
+  class BookAdmin(ImportExportModelAdmin):
+    export_form_class = ExportForm
+
+Success message
+"""""""""""""""
+
+The success message shown on successful import has been updated to include the number of 'deleted' and 'skipped' rows.
+See `this PR <https://github.com/django-import-export/django-import-export/issues/1691>`_.
+
+Import error messages
+"""""""""""""""""""""
+
+The default error message for import errors has been modified to simplify the format.
+Error messages now contain the error message only by default.  The row and traceback are not presented.
+
+The original format can be restored by setting :attr:`~import_export.admin.ImportMixin.import_error_display` on the
+Admin class definition.  For example::
+
+  class BookAdmin(ImportExportModelAdmin):
+    import_error_display = ("message", "row", "traceback")
+
+
+See `this issue <https://github.com/django-import-export/django-import-export/issues/1724>`_.
+
+API changes
+^^^^^^^^^^^
+
+v4 of import-export contains a number of changes to the API.  These changes are summarized in the table below.
+Refer to
+`this PR <https://github.com/django-import-export/django-import-export/pull/1641/>`_ for detailed information.
+
+If you have customized import-export by overriding methods, then you may have to modify your installation before
+working with v4.
+
+If you have not overridden any methods then you should not be affected by these changes and no changes to your code
+should be necessary.
+
+The API changes include changes to method arguments, although some method names have changed.
+
+Methods which process row data have been updated so that method args are standardized.
+This has been done to resolve inconsistency issues where the parameters differed between method calls, and to allow
+easier extensibility.
+
+:class:`import_export.resources.Resource`
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. _renamed_methods:
+
+Renamed methods
+"""""""""""""""
+
+.. list-table::
+   :header-rows: 1
+
+   * - Previous
+     - New
+     - Summary
+
+   * - ``import_obj(self, obj, data, dry_run, **kwargs)``
+     - ``import_instance(self, instance, row, **kwargs)``
+     -  * ``obj`` param renamed to ``instance``
+        * ``data`` param renamed to ``row``
+        * ``dry_run`` param now in ``kwargs``
+
+   * - ``after_import_instance(self, instance, new, row_number=None, **kwargs)``
+     - ``after_init_instance(self, instance, new, row, **kwargs)``
+     -  * ``row`` added as mandatory arg
+        * ``row_number`` now in ``kwargs``
+
+Parameter changes
+"""""""""""""""""
+
+This section describes methods in which the parameters have changed.
+
+.. list-table::
+   :header-rows: 1
+
+   * - Previous
+     - New
+     - Summary
+
+   * - ``before_import(self, dataset, using_transactions, dry_run, **kwargs)``
+     - ``before_import(self, dataset, **kwargs)``
+     -  * ``using_transactions`` param now in ``kwargs``
+        * ``dry_run`` param now in ``kwargs``
+
+   * - ``after_import(self, dataset, result, using_transactions, dry_run, **kwargs)``
+     - ``after_import(self, dataset, result, **kwargs)``
+     -  * ``using_transactions`` param now in ``kwargs``
+        * ``dry_run`` param now in ``kwargs``
+
+   * - ``before_import_row(self, row, row_number=None, **kwargs)``
+     - ``before_import_row(self, row, **kwargs)``
+     - * ``row_number`` now in ``kwargs``
+
+   * - ``after_import_row(self, row, row_result, row_number=None, **kwargs)``
+     - ``after_import_row(self, row, row_result, **kwargs)``
+     - * ``row_number`` now in ``kwargs``
+
+   * - ``import_row(self, row, instance_loader, using_transactions=True, dry_run=False, **kwargs)``
+     - ``import_row(self, row, instance_loader, **kwargs)``
+     - * ``dry_run`` param now in ``kwargs``
+       * ``using_transactions`` param now in ``kwargs``
+
+   * - ``save_instance(self, instance, is_create, using_transactions=True, dry_run=False)``
+     - ``save_instance(self, instance, is_create, row, **kwargs)``
+     - * ``dry_run`` param now in ``kwargs``
+       * ``using_transactions`` param now in ``kwargs``
+       * ``row`` added as mandatory arg
+
+   * - ``save_m2m(self, obj, data, using_transactions, dry_run)``
+     - ``save_m2m(self, instance, row, **kwargs)``
+     - * ``row`` added as mandatory arg
+       * ``obj`` renamed to ``instance``
+       * ``data`` renamed to ``row``
+       * ``dry_run`` param now in ``kwargs``
+       * ``using_transactions`` param now in ``kwargs``
+
+   * - ``before_save_instance(self, instance, using_transactions, dry_run)``
+     - ``before_save_instance(self, instance, row, **kwargs)``
+     - * ``row`` added as mandatory arg
+       * ``dry_run`` param now in ``kwargs``
+       * ``using_transactions`` param now in ``kwargs``
+
+   * - ``after_save_instance(self, instance, using_transactions, dry_run)``
+     - ``after_save_instance(self, instance, row, **kwargs)``
+     - * ``row`` added as mandatory arg
+       * ``dry_run`` param now in ``kwargs``
+       * ``using_transactions`` param now in ``kwargs``
+
+   * - ``delete_instance(self, instance, using_transactions=True, dry_run=False)``
+     - ``delete_instance(self, instance, row, **kwargs)``
+     - * ``row`` added as mandatory arg
+       * ``dry_run`` param now in ``kwargs``
+       * ``using_transactions`` param now in ``kwargs``
+
+   * - ``before_delete_instance(self, instance, dry_run)``
+     - ``before_delete_instance(self, instance, row, **kwargs)``
+     - * ``row`` added as mandatory arg
+       * ``dry_run`` param now in ``kwargs``
+       * ``using_transactions`` param now in ``kwargs``
+
+   * - ``after_delete_instance(self, instance, dry_run)``
+     - ``after_delete_instance(self, instance, row, **kwargs)``
+     - * ``row`` added as mandatory arg
+       * ``dry_run`` param now in ``kwargs``
+       * ``using_transactions`` param now in ``kwargs``
+
+   * - ``import_field(self, field, obj, data, is_m2m=False, **kwargs)``
+     - ``import_field(self, field, instance, row, is_m2m=False, **kwargs):``
+     - * ``obj`` renamed to ``instance``
+       * ``data`` renamed to ``row``
+
+   * - ``before_export(self, queryset, *args, **kwargs)``
+     - ``before_export(self, queryset, **kwargs)``
+     - * unused ``*args`` list removed
+
+   * - ``after_export(self, queryset, data, *args, **kwargs)``
+     - ``after_export(self, queryset, dataset, **kwargs)``
+     - * unused ``*args`` list removed
+       * ``data`` renamed to ``dataset``
+
+   * - ``filter_export(self, queryset, *args, **kwargs)``
+     - ``filter_export(self, queryset, **kwargs)``
+     - * unused ``*args`` list removed
+
+   * - ``export_field(self, field, obj)``
+     - ``export_field(self, field, instance)``
+     - * ``obj`` renamed to ``instance``
+
+   * - ``export_resource(self, obj)``
+     - ``export_resource(self, instance, fields=None)``
+     - * ``obj`` renamed to ``instance``
+       * ``fields`` passed as kwarg
+
+   * - ``export(self, *args, queryset=None, **kwargs)``
+     - ``export(self, queryset=None, **kwargs)``
+     - * unused ``*args`` list removed
+
+   * - ``get_export_headers(self)``
+     - ``get_export_headers(self, fields=None)``
+     - * ``fields`` passed as kwarg
+
+
+:class:`import_export.mixins.BaseImportExportMixin`
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Parameter changes
+"""""""""""""""""
+
+.. list-table::
+   :header-rows: 1
+
+   * - Previous
+     - New
+     - Summary
+
+   * - ``get_resource_classes(self)``
+     - ``get_resource_classes(self, request)``
+     -  * Added ``request`` param
+
+   * - ``get_resource_kwargs(self, request, *args, **kwargs)``
+     - ``get_resource_kwargs(self, request, **kwargs)``
+     -  * unused ``*args`` list removed
+
+:class:`import_export.mixins.BaseImportMixin`
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Parameter changes
+"""""""""""""""""
+
+.. list-table::
+   :header-rows: 1
+
+   * - Previous
+     - New
+     - Summary
+
+   * - ``get_import_resource_kwargs(self, request, *args, **kwargs)``
+     - ``get_import_resource_kwargs(self, request, **kwargs)``
+     -  * unused ``*args`` list removed
+
+   * - ``get_import_resource_classes(self)``
+     - ``get_import_resource_classes(self, request)``
+     -  * Added ``request`` param
+
+   * - ``choose_import_resource_class(self, form)``
+     - ``choose_import_resource_class(self, form, request)``
+     -  * Added ``request`` param
+
+:class:`import_export.mixins.BaseExportMixin`
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Parameter changes
+"""""""""""""""""
+
+.. list-table::
+   :header-rows: 1
+
+   * - Previous
+     - New
+     - Summary
+
+   * - ``get_export_resource_classes(self)``
+     - ``get_export_resource_classes(self, request)``
+     -  * Added ``request`` param
+
+   * - ``get_export_resource_kwargs(self, request, *args, **kwargs)``
+     - ``get_export_resource_kwargs(self, request, **kwargs)``
+     -  * unused ``*args`` list removed
+
+   * - ``get_data_for_export(self, request, queryset, *args, **kwargs)``
+     - ``get_data_for_export(self, request, queryset, **kwargs)``
+     -  * unused ``*args`` list removed
+
+   * - ``choose_export_resource_class(self, form)``
+     - ``choose_export_resource_class(self, form, request)``
+     -  * Added ``request`` param
+
+
+:class:`import_export.fields.Field`
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Parameter changes
+"""""""""""""""""
+
+.. list-table::
+   :header-rows: 1
+
+   * - Previous
+     - New
+     - Summary
+
+   * - ``clean(self, data, **kwargs)``
+     - ``clean(self, row, **kwargs)``
+     - * ``data`` renamed to ``row``
+
+   * - ``get_value(self, instance)``
+     - ``get_value(self, obj)``
+     - * ``obj`` renamed to ``instance``
+
+   * - ``save(self, obj, data, is_m2m=False, **kwargs)``
+     - ``save(self, instance, row, is_m2m=False, **kwargs)``
+     - * ``obj`` renamed to ``instance``
+       * ``data`` renamed to ``row``
+
+   * - ``export(self, obj)``
+     - ``export(self, instance)``
+     - * ``obj`` renamed to ``instance``
+
+
+:class:`import_export.forms.ImportExportFormBase`
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+If you have subclassed one of the :mod:`~import_export.forms` then you may need to
+modify the parameters passed to constructors.
+
+The ``input_format`` field of :class:`~import_export.forms.ImportForm` has been moved to the parent class
+(:class:`~import_export.forms.ImportExportFormBase`) and renamed to ``format``.
+
+The ``file_format`` field of :class:`~import_export.forms.ExportForm` has been removed and is now replaced by
+:attr:`~import_export.forms.ImportExportFormBase.format`.
+
+Parameter changes
+"""""""""""""""""
+
+.. list-table::
+   :header-rows: 1
+
+   * - Previous
+     - New
+     - Summary
+
+   * - ``__init__(self, *args, resources=None, **kwargs)``
+     - ``__init__(self, formats, resources, **kwargs)``
+     - * ``formats`` added as a mandatory arg
+       * ``resources`` added as a mandatory arg
+       * unused ``*args`` list removed
