@@ -1,0 +1,4 @@
+flask
+requests
+pytest
+cloudevents==2.0.0
