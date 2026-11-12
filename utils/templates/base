@@ -1,0 +1,44 @@
+
+    @query_params({{ api.query_params|map("tojson")|join(", ")}})   
+    async def {{ api.name }}(self, *, {% block func_params %}{% include "func_params" %}{% endblock %}) -> Any:
+        """
+        {% if api.description %}
+        {{ api.description|replace("\n", " ")|wordwrap(wrapstring="\n        ") }}
+        {% endif %}
+        
+        {% if api.doc_url %}
+
+        `<{{ api.doc_url }}>`_
+        {% endif %}
+        {% if api.stability != "stable" %}
+
+        .. warning::
+        
+            This API is **{{ api.stability }}** so may include breaking changes
+            or be removed in a future version
+        {% endif %}
+        {% if api.params|list|length %}
+
+        {% for p, info in api.params %}
+        {% if info.description %}
+        {% filter wordwrap(72, wrapstring="\n            ") %}
+        :arg {{ p }}{% if info.deprecated and info.deprecation_message is defined %} (Deprecated: {{ info['deprecation_message'][:-1] }}.){% endif %}: {{ info.description }} {% if info.options and "Valid values" not in info.description %}Valid choices are {{ info.options|join(", ") }}.{% endif %}
+        {% if info.default is defined %}{% if info.default is not none %}{% if info.default is sameas(false) %}Default is false.{% else %}Default is {{ info.default }}.{% endif %}{% endif %}{% endif %}
+        {% endfilter %}
+
+        {% endif %}
+        {% endfor %}
+        {% endif %}
+        """
+        {% if api.deprecation_message %}
+        from warnings import warn
+        warn("Deprecated: {{ api.deprecation_message }}")
+        {% endif %}
+        {% include "substitutions" %}
+        {% include "required" %}
+        {% if api.body.serialize %}
+        body = _bulk_body(self.transport.serializer, body)
+        {% endif %}
+        {% block request %}
+        return await self.transport.perform_request("{{ api.method }}", {% include "url" %}, params=params, headers=headers{% if api.body %}, body=body{% endif %})
+        {% endblock %}

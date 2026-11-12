@@ -1,0 +1,8 @@
+{% extends "base" %}
+{% block request %}
+        if index in SKIP_IN_PATH:
+            index = "_all"
+
+        {{ super()|trim }}
+{% endblock %}
+
